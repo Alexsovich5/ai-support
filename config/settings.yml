@@ -1,0 +1,99 @@
+# Application Configuration
+# Project: AI-Powered Healthcare IT Support System
+# Author: Alexander Efrem - IT Operations Specialist, AEL Dubai
+# Timeline: April 2024 - June 2024
+
+app:
+  name: "AI Healthcare IT Support"
+  version: "1.4.0"
+  environment: "production"
+  debug: false
+  log_level: "INFO"
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+  timeout_keep_alive: 30
+  access_log: true
+
+ai:
+  model_name: "gpt-4-0125-preview"
+  temperature: 0.3
+  max_tokens: 2048
+  request_timeout: 30
+  max_retries: 2
+  streaming_enabled: true
+
+  classification:
+    model_name: "gpt-4-0125-preview"
+    temperature: 0.1
+    max_tokens: 500
+
+  embeddings:
+    model: "text-embedding-3-small"
+    chunk_size: 500
+
+knowledge_base:
+  persist_directory: "./data/chroma"
+  collection_name: "healthcare_it_knowledge"
+  chunk_size: 1000
+  chunk_overlap: 200
+  max_search_results: 10
+  min_relevance_score: 0.3
+
+redis:
+  url: "redis://localhost:6379"
+  max_connections: 20
+  session_ttl_seconds: 3600
+  decode_responses: true
+
+chat:
+  max_message_length: 4096
+  max_context_messages: 10
+  session_timeout_seconds: 1800
+  max_concurrent_sessions: 200
+  typing_indicator_enabled: true
+
+security:
+  phi_detection_enabled: true
+  rate_limit_per_minute: 30
+  rate_limit_burst: 50
+  jwt_algorithm: "HS256"
+  jwt_expiry_minutes: 60
+  allowed_origins:
+    - "https://support.ael-dubai.ae"
+    - "https://dashboard.ael-dubai.ae"
+  allowed_hosts:
+    - "*.ael-dubai.ae"
+    - "localhost"
+    - "127.0.0.1"
+
+escalation:
+  confidence_threshold: 0.4
+  max_retries_before_escalation: 3
+  auto_escalate_categories:
+    - "security"
+    - "ehr_systems"
+  notification_channels:
+    - "email"
+    - "slack"
+    - "pagerduty"
+
+monitoring:
+  prometheus_enabled: true
+  metrics_port: 9090
+  health_check_interval: 30
+  log_retention_days: 90
+
+integrations:
+  servicenow:
+    enabled: true
+    instance_url: "https://ael-dubai.service-now.com"
+    api_version: "v2"
+  jira:
+    enabled: false
+    server_url: "https://jira.ael-dubai.ae"
+  slack:
+    enabled: true
+    webhook_channel: "#it-support-ai"

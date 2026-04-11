@@ -1,0 +1,108 @@
+# AI-Powered Healthcare IT Support System - Docker Compose
+# Author: Alexander Efrem - IT Operations Specialist, AEL Dubai
+# Timeline: April 2024 - June 2024
+
+version: "3.9"
+
+services:
+  ai-support-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-support-api
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - REDIS_URL=redis://redis:6379
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
+      - CHROMA_PERSIST_DIR=/app/data/chroma
+    volumes:
+      - chroma_data:/app/data/chroma
+      - ./config:/app/config:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ai-support-network
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    container_name: ai-support-redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD:-defaultpass}
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - ai-support-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:v2.49.0
+    container_name: ai-support-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+    networks:
+      - ai-support-network
+
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: ai-support-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - ai-support-network
+
+volumes:
+  chroma_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  ai-support-network:
+    driver: bridge
+    name: ai-support-network
