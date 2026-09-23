@@ -2,7 +2,6 @@
 """
 API Route Definitions
 Project: AI-Powered Healthcare IT Support System
-Author: Alexander Efrem - IT Operations Specialist, AEL Dubai
 Timeline: April 2024 - June 2024
 
 FastAPI route definitions for chat, ticket classification,

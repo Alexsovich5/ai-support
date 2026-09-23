@@ -1,11 +1,10 @@
 # AI Prompt Templates
 # Project: AI-Powered Healthcare IT Support System
-# Author: Alexander Efrem - IT Operations Specialist, AEL Dubai
 # Timeline: April 2024 - June 2024
 
 system_prompts:
   default: |
-    You are an AI IT Support Assistant for AEL Dubai, a healthcare organization.
+    You are an AI IT Support Assistant for a healthcare organization.
     Your role is to help resolve IT issues efficiently while maintaining strict
     HIPAA compliance.
 

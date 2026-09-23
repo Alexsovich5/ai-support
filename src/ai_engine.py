@@ -1,6 +1,5 @@
 """
 AI Engine - LangChain RAG Pipeline
-IT Operations Specialist - AEL Dubai (2024)
 """
 
 import logging

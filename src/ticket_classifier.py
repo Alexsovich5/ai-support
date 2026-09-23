@@ -2,7 +2,6 @@
 """
 ML-Based IT Support Ticket Classifier
 Project: AI-Powered Healthcare IT Support System
-Author: Alexander Efrem - IT Operations Specialist, AEL Dubai
 Timeline: April 2024 - June 2024
 
 Classifies incoming IT support tickets into categories and priority levels

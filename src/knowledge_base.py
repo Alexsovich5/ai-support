@@ -2,7 +2,6 @@
 """
 RAG Knowledge Base Manager
 Project: AI-Powered Healthcare IT Support System
-Author: Alexander Efrem - IT Operations Specialist, AEL Dubai
 Timeline: April 2024 - June 2024
 
 Manages the vector store knowledge base for Retrieval-Augmented Generation.
