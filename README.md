@@ -1,42 +1,55 @@
 # AI-Powered Healthcare IT Support System
 
-![Project Status](https://img.shields.io/badge/Status-Complete-brightgreen)
-![Timeline](https://img.shields.io/badge/Timeline-April%202024%20--%20June%202024-blue)
-![Technology](https://img.shields.io/badge/Tech-Python%203.11%20%7C%20OpenAI%20%7C%20LangChain%20%7C%20FastAPI-orange)
-
-## Project Overview
-
 AI-powered IT support system for healthcare environment using LangChain and OpenAI API for intelligent ticket classification, automated responses, and knowledge base search with FastAPI backend.
 
-**Role**: IT Operations Specialist
-**Organization**: AEL Dubai
-**Duration**: April 2024 - June 2024
-**Project**: #28 of 30 in IT Career Portfolio
+Personal project, built to explore retrieval-augmented ticket triage with LangChain. It is not production software — see **Status** below for exactly what is and isn't implemented.
 
-## Business Impact
+## Status
 
-- **70% Faster First Response**: AI-generated initial responses
-- **85% Classification Accuracy**: Automatic ticket categorization
-- **24/7 Availability**: AI chatbot for common IT issues
-- **Knowledge Base Integration**: Context-aware resolution suggestions
+**Implemented**
 
-## Technology Stack
+- FastAPI service with chat and ticket endpoints
+- Ticket classifier and knowledge-base retrieval over Chroma
+- Prompt configuration split out into `config/prompts.yml`
+- A unit test suite for the classifier
+- Dockerfile and Compose setup
 
-- **Python 3.11**: Core application
-- **OpenAI API (GPT-4)**: Natural language understanding
-- **LangChain**: AI orchestration and RAG pipeline
-- **FastAPI**: High-performance API
-- **ChromaDB**: Vector store for knowledge base
+**Not implemented / known limitations**
 
-## Contributing
+- Requires an OpenAI API key; no offline/local model path
+- Classifier is not evaluated against a labelled dataset — accuracy is unmeasured
+- No auth on the API
 
-This is a historical project from April 2024 - June 2024, preserved for portfolio purposes.
+## Built with
 
-## License
+- **Python** — fastapi, uvicorn, langchain, openai, chromadb, PyYAML
 
-Professional portfolio project - AEL Dubai
+## Running it
 
----
+```bash
+pip install -r requirements.txt
+python src/main.py
+```
 
-**Developed during April 2024 - June 2024**
-*Part of Alexander Efrem's IT Career Portfolio (2012-2024)*
+## Layout
+
+```
+Dockerfile
+config/
+  prompts.yml
+  settings.yml
+docker-compose.yml
+requirements.txt
+src/
+  ai_engine.py
+  api/
+    models.py
+    routes.py
+  chat_handler.py
+  knowledge_base.py
+  main.py
+  ticket_classifier.py
+tests/
+  test_classifier.py
+```
+
