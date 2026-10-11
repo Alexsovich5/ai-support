@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-ML-Based IT Support Ticket Classifier
-Project: AI-Powered Healthcare IT Support System
+IT support ticket classifier.
 
 Classifies incoming IT support tickets into categories and priority levels
-using GPT-4 with structured output. Supports automated routing and SLA
-assignment for healthcare IT operations.
+with a chat model returning JSON, and falls back to keyword rules when the
+model call or the parse fails. Results carry the routed team and SLA targets.
 """
 
 import json
@@ -15,9 +14,14 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Any, Mapping, Optional
 
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
+
+from src.config import Settings, load_prompts, load_settings
+from src.phi_filter import redact
 
 logger = logging.getLogger("ai_support.classifier")
 
@@ -150,51 +154,57 @@ class ClassificationResult:
 
 class TicketClassifier:
     """
-    GPT-4 based ticket classifier with structured output parsing.
-    Classifies tickets by category, priority, and severity with
-    automated routing and SLA assignment.
+    Chat-model ticket classifier with structured output parsing.
+
+    The prompt comes from ``prompts.yml`` (``classification.system_prompt`` and
+    ``classification.user_template``). Patient identifiers are redacted from the
+    ticket before rendering. Categories listed in
+    ``settings.escalation.auto_escalate_categories`` always require escalation.
+    An OpenAI client is built only when no ``llm`` is injected.
     """
-
-    CLASSIFICATION_PROMPT = """You are an IT support ticket classifier for a healthcare organization.
-Analyze the following support ticket and provide a structured classification.
-
-IMPORTANT RULES:
-- Healthcare/EHR system issues affecting patient care are always CRITICAL priority
-- Security incidents are always HIGH priority or above
-- Consider the healthcare environment when assessing impact
-- If multiple categories apply, choose the primary one
-
-Ticket Title: {title}
-Ticket Description: {description}
-{additional_context}
-
-Respond in the following JSON format ONLY (no other text):
-{{
-    "category": "<one of: network, email, vpn, ehr_systems, active_directory, printing, hardware, software, security, cloud_services, mobile_devices, telephony>",
-    "priority": "<one of: critical, high, medium, low>",
-    "severity": "<one of: sev1, sev2, sev3, sev4>",
-    "confidence": <float 0.0-1.0>,
-    "suggested_tags": ["tag1", "tag2"],
-    "reasoning": "<brief explanation of classification>",
-    "requires_escalation": <true/false>
-}}"""
 
     def __init__(
         self,
+        llm: Optional[BaseChatModel] = None,
+        settings: Optional[Settings] = None,
         model_name: str = "gpt-4-0125-preview",
         temperature: float = 0.1,
+        prompts: Optional[Mapping[str, Any]] = None,
     ):
-        self.llm = ChatOpenAI(
-            model=model_name,
-            temperature=temperature,
-            max_tokens=500,
-            request_timeout=15,
+        self.settings = settings if settings is not None else load_settings()
+        prompts = prompts if prompts is not None else load_prompts()
+        self.system_prompt: str = prompts["classification"]["system_prompt"]
+        self.user_template: str = prompts["classification"]["user_template"]
+        self.auto_escalate_categories = frozenset(
+            self.settings.escalation.auto_escalate_categories
         )
+
+        if llm is None:
+            llm = ChatOpenAI(
+                model=model_name,
+                temperature=temperature,
+                max_tokens=500,
+                request_timeout=15,
+            )
+            logger.info("Ticket classifier built OpenAI client: model=%s", model_name)
+        self.llm = llm
 
         self._classification_count = 0
         self._total_time_ms = 0.0
 
-        logger.info("Ticket classifier initialized: model=%s", model_name)
+    def build_messages(
+        self,
+        title: str,
+        description: str,
+        additional_context: str = "",
+    ) -> list[BaseMessage]:
+        """Render the system and user messages for an already-redacted ticket."""
+        user_prompt = self.user_template.format(
+            title=title,
+            description=description,
+            additional_context=additional_context or "none",
+        )
+        return [SystemMessage(content=self.system_prompt), HumanMessage(content=user_prompt)]
 
     async def classify(
         self,
@@ -209,20 +219,20 @@ Respond in the following JSON format ONLY (no other text):
         """
         start_time = time.perf_counter()
 
-        additional_context = ""
+        context_parts = []
         if reporter_department:
-            additional_context += f"Reporter Department: {reporter_department}\n"
+            context_parts.append(f"Reporter Department: {reporter_department}")
         if reporter_role:
-            additional_context += f"Reporter Role: {reporter_role}\n"
+            context_parts.append(f"Reporter Role: {reporter_role}")
 
-        prompt = self.CLASSIFICATION_PROMPT.format(
-            title=title,
-            description=description,
-            additional_context=additional_context,
-        )
+        title = redact(title).text
+        description = redact(description).text
+        additional_context = redact("\n".join(context_parts)).text
+
+        messages = self.build_messages(title, description, additional_context)
 
         try:
-            response = await self.llm.ainvoke(prompt)
+            response = await self.llm.ainvoke(messages)
             raw_response = response.content.strip()
 
             # Parse JSON response
@@ -232,6 +242,10 @@ Respond in the following JSON format ONLY (no other text):
             category = TicketCategory(classification_data["category"])
             priority = TicketPriority(classification_data["priority"])
             severity = TicketSeverity(classification_data["severity"])
+
+            requires_escalation = bool(classification_data.get("requires_escalation", False))
+            if category.value in self.auto_escalate_categories:
+                requires_escalation = True
 
             result = ClassificationResult(
                 category=category,
@@ -243,7 +257,7 @@ Respond in the following JSON format ONLY (no other text):
                 sla_resolution_hours=SLA_RESOLUTION_HOURS[priority],
                 suggested_tags=classification_data.get("suggested_tags", []),
                 reasoning=classification_data.get("reasoning", ""),
-                requires_escalation=classification_data.get("requires_escalation", False),
+                requires_escalation=requires_escalation,
                 classification_time_ms=classification_time,
             )
 

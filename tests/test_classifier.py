@@ -7,9 +7,14 @@ Unit tests for the ticket classification system including
 AI-based and fallback classification paths.
 """
 
-import pytest
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
+
+from src.config import load_settings
+from src.fakes import ExtractiveFakeChatModel
 from src.ticket_classifier import (
     ClassificationResult,
     TicketCategory,
@@ -20,6 +25,7 @@ from src.ticket_classifier import (
     SLA_RESPONSE_HOURS,
     SLA_RESOLUTION_HOURS,
 )
+from tests.helpers import RecordingFakeChatModel
 
 
 # -------------------------------------------------------------------
@@ -377,3 +383,159 @@ class TestAIClassification:
         stats = classifier.get_stats()
         assert stats["total_classifications"] == 1
         assert stats["avg_classification_time_ms"] > 0
+
+
+# -------------------------------------------------------------------
+# Injected model, prompt contract, PHI redaction and auto-escalation
+# -------------------------------------------------------------------
+
+CONTRACT_KEYS = (
+    "category",
+    "priority",
+    "severity",
+    "confidence",
+    "suggested_tags",
+    "reasoning",
+    "requires_escalation",
+)
+
+
+def _reply(**overrides) -> str:
+    data = {
+        "category": "network",
+        "priority": "medium",
+        "severity": "sev3",
+        "confidence": 0.9,
+        "suggested_tags": ["wifi"],
+        "reasoning": "connectivity",
+        "requires_escalation": False,
+    }
+    data.update(overrides)
+    return json.dumps(data)
+
+
+@pytest.fixture
+def fake_settings():
+    return load_settings(env={"LLM_PROVIDER": "fake"})
+
+
+class TestInjectedModel:
+    @pytest.mark.asyncio
+    async def test_rendered_prompt_contains_contract_and_marker(self, fake_settings):
+        model = RecordingFakeChatModel(responses=[_reply()])
+        clf = TicketClassifier(llm=model, settings=fake_settings)
+
+        await clf.classify(title="WiFi drops", description="Floor 3 loses WiFi")
+
+        prompt = model.last_prompt_text()
+        assert "### TICKET_CLASSIFICATION_JSON ###" in prompt
+        for key in CONTRACT_KEYS:
+            assert f'"{key}"' in prompt, key
+        assert "WiFi drops" in prompt and "Floor 3 loses WiFi" in prompt
+        assert "ticket classifier" in prompt  # system prompt from prompts.yml
+
+    def test_in_code_prompt_constant_removed(self):
+        assert not hasattr(TicketClassifier, "CLASSIFICATION_PROMPT")
+
+    @pytest.mark.asyncio
+    async def test_phi_is_redacted_before_the_model(self, fake_settings):
+        model = RecordingFakeChatModel(responses=[_reply()])
+        clf = TicketClassifier(llm=model, settings=fake_settings)
+
+        await clf.classify(
+            title="Printer jam for MRN 12345678",
+            description="Cannot print labels for MRN 12345678, call 555-123-4567",
+            reporter_department="Ward MRN 87654321",
+        )
+
+        prompt = model.last_prompt_text()
+        assert "12345678" not in prompt
+        assert "87654321" not in prompt
+        assert "555-123-4567" not in prompt
+        assert "[REDACTED:mrn]" in prompt
+        assert "[REDACTED:phone]" in prompt
+
+    @pytest.mark.asyncio
+    async def test_auto_escalate_category_forces_escalation(self, fake_settings):
+        assert "ehr_systems" in fake_settings.escalation.auto_escalate_categories
+        model = FakeListChatModel(
+            responses=[_reply(category="ehr_systems", priority="critical", severity="sev1",
+                              requires_escalation=False)]
+        )
+        clf = TicketClassifier(llm=model, settings=fake_settings)
+
+        result = await clf.classify(title="Epic slow", description="Charts load slowly")
+
+        assert result.category == TicketCategory.EHR_SYSTEMS
+        assert result.confidence == 0.9
+        assert result.requires_escalation is True
+
+    @pytest.mark.asyncio
+    async def test_other_category_keeps_model_escalation_flag(self, fake_settings):
+        model = FakeListChatModel(responses=[_reply(requires_escalation=False)])
+        clf = TicketClassifier(llm=model, settings=fake_settings)
+
+        result = await clf.classify(title="WiFi", description="Slow WiFi")
+
+        assert result.category == TicketCategory.NETWORK
+        assert result.requires_escalation is False
+
+    @pytest.mark.asyncio
+    async def test_fenced_json_reply_parses(self, fake_settings):
+        fenced = "```json\n" + _reply(category="email", priority="low", severity="sev4",
+                                      confidence=0.77) + "\n```"
+        clf = TicketClassifier(llm=FakeListChatModel(responses=[fenced]), settings=fake_settings)
+
+        result = await clf.classify(title="Outlook", description="Signature missing")
+
+        assert result.category == TicketCategory.EMAIL
+        assert result.priority == TicketPriority.LOW
+        assert result.confidence == 0.77
+
+    @pytest.mark.asyncio
+    async def test_extractive_fake_model_falls_back(self, fake_settings):
+        clf = TicketClassifier(llm=ExtractiveFakeChatModel(), settings=fake_settings)
+
+        result = await clf.classify(title="Printer offline", description="Jobs stuck")
+
+        assert result.confidence == 0.5
+        assert result.category == TicketCategory.PRINTING
+        assert "fallback-classification" in result.suggested_tags
+        assert result.requires_escalation is True
+
+    @pytest.mark.asyncio
+    async def test_batch_classify_preserves_order(self, fake_settings):
+        replies = [
+            _reply(category="vpn"),
+            _reply(category="printing"),
+            _reply(category="telephony"),
+        ]
+        clf = TicketClassifier(llm=FakeListChatModel(responses=replies), settings=fake_settings)
+
+        results = await clf.batch_classify(
+            [{"title": f"t{i}", "description": f"d{i}"} for i in range(3)]
+        )
+
+        assert [r.category for r in results] == [
+            TicketCategory.VPN,
+            TicketCategory.PRINTING,
+            TicketCategory.TELEPHONY,
+        ]
+
+    def test_injected_model_does_not_build_openai_client(self, fake_settings):
+        model = FakeListChatModel(responses=[_reply()])
+        with patch("src.ticket_classifier.ChatOpenAI") as mock_openai:
+            clf = TicketClassifier(llm=model, settings=fake_settings)
+        mock_openai.assert_not_called()
+        assert clf.llm is model
+
+    def test_existing_fixture_still_constructs(self, classifier):
+        assert isinstance(classifier, TicketClassifier)
+        assert classifier.llm is not None
+
+    def test_default_construction_uses_keyword_arguments(self):
+        with patch("src.ticket_classifier.ChatOpenAI") as mock_openai:
+            TicketClassifier(model_name="gpt-4-test", temperature=0.2)
+        kwargs = mock_openai.call_args.kwargs
+        assert kwargs["model"] == "gpt-4-test"
+        assert kwargs["temperature"] == 0.2
