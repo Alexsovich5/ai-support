@@ -181,10 +181,6 @@ class TestFallbackClassification:
         assert result.priority == TicketPriority.CRITICAL
         assert result.severity == TicketSeverity.SEV1
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="fallback matches 'email' before security keywords and never sets HIGH for security",
-    )
     def test_security_high_priority(self, classifier, sample_security_ticket):
         result = classifier._fallback_classification(
             title=sample_security_ticket["title"],
@@ -193,6 +189,86 @@ class TestFallbackClassification:
         )
         assert result.category == TicketCategory.SECURITY
         assert result.priority == TicketPriority.HIGH
+
+    def test_phishing_email_is_security(self, classifier):
+        result = classifier._fallback_classification(
+            title="Phishing email received",
+            description="An email asked me to confirm my mailbox password on an outside site.",
+            start_time=0,
+        )
+        assert result.category == TicketCategory.SECURITY
+        assert result.assigned_team == "security-ops-team"
+
+    def test_security_fallback_priority_is_high(self, classifier, sample_security_ticket):
+        result = classifier._fallback_classification(
+            title=sample_security_ticket["title"],
+            description=sample_security_ticket["description"],
+            start_time=0,
+        )
+        assert result.category == TicketCategory.SECURITY
+        assert result.priority == TicketPriority.HIGH
+        assert result.severity == TicketSeverity.SEV2
+
+    def test_security_with_critical_keyword_is_critical(self, classifier):
+        result = classifier._fallback_classification(
+            title="Malware outbreak",
+            description="Ransom note on several workstations, file shares are down.",
+            start_time=0,
+        )
+        assert result.category == TicketCategory.SECURITY
+        assert result.priority == TicketPriority.CRITICAL
+        assert result.severity == TicketSeverity.SEV1
+
+    def test_download_does_not_trigger_critical(self, classifier):
+        result = classifier._fallback_classification(
+            title="Cannot download installer",
+            description="The download of the PDF reader stops halfway.",
+            start_time=0,
+        )
+        assert result.priority == TicketPriority.MEDIUM
+        assert result.severity == TicketSeverity.SEV3
+
+    def test_down_still_triggers_critical(self, classifier):
+        result = classifier._fallback_classification(
+            title="Shared drive down",
+            description="Nobody can open the shared drive.",
+            start_time=0,
+        )
+        assert result.priority == TicketPriority.CRITICAL
+
+    def test_printing_matches_print(self, classifier):
+        result = classifier._fallback_classification(
+            title="Printing fails on 3rd floor",
+            description="Jobs sit in the queue.",
+            start_time=0,
+        )
+        assert result.category == TicketCategory.PRINTING
+
+    def test_phones_match_telephony(self, classifier):
+        result = classifier._fallback_classification(
+            title="phones not ringing",
+            description="Incoming calls go straight to voicemail.",
+            start_time=0,
+        )
+        assert result.category == TicketCategory.TELEPHONY
+
+    def test_keyword_inside_other_word_does_not_match(self, classifier):
+        result = classifier._fallback_classification(
+            title="Spreadsheet crashes on the sprint workbook",
+            description="The dropdown in the expense sheet is empty.",
+            start_time=0,
+        )
+        # "print" inside "sprint" and "down" inside "dropdown" must not match
+        assert result.category == TicketCategory.SOFTWARE
+        assert result.priority == TicketPriority.MEDIUM
+
+    def test_fallback_time_is_small_when_start_is_zero(self, classifier):
+        result = classifier._fallback_classification(
+            title="Generic issue",
+            description="Something is not working properly",
+            start_time=0,
+        )
+        assert 0 <= result.classification_time_ms < 1000
 
     def test_password_ad_classification(self, classifier, sample_password_ticket):
         result = classifier._fallback_classification(
@@ -224,6 +300,11 @@ class TestFallbackClassification:
 # -------------------------------------------------------------------
 
 class TestResponseParsing:
+    def test_invalid_severity_raises_error(self, classifier):
+        raw = '{"category": "network", "priority": "high", "severity": "sev9"}'
+        with pytest.raises(ValueError, match="Invalid severity"):
+            classifier._parse_response(raw)
+
     def test_valid_json_parsing(self, classifier):
         raw = '{"category": "network", "priority": "high", "severity": "sev2", "confidence": 0.9, "suggested_tags": ["wifi"], "reasoning": "test", "requires_escalation": false}'
         result = classifier._parse_response(raw)

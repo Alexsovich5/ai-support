@@ -10,6 +10,7 @@ assignment for healthcare IT operations.
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -80,6 +81,37 @@ ROUTING_MAP = {
     TicketCategory.MOBILE_DEVICES: "mobile-device-mgmt",
     TicketCategory.TELEPHONY: "telecom-team",
 }
+
+
+# Fallback keyword map. Order matters: the first category with a match wins,
+# so security is checked before email (a phishing email is a security issue).
+FALLBACK_KEYWORDS = {
+    TicketCategory.SECURITY: ["virus", "malware", "ransomware", "phishing", "breach", "suspicious", "unauthorized", "hacked"],
+    TicketCategory.NETWORK: ["network", "wifi", "internet", "connectivity", "dns", "dhcp"],
+    TicketCategory.EMAIL: ["email", "outlook", "mailbox", "smtp", "exchange"],
+    TicketCategory.VPN: ["vpn", "remote access", "tunnel", "connection dropped"],
+    TicketCategory.EHR_SYSTEMS: ["ehr", "epic", "cerner", "clinical", "patient record", "emr"],
+    TicketCategory.ACTIVE_DIRECTORY: ["password", "login", "locked out", "active directory", "ad account"],
+    TicketCategory.PRINTING: ["printer", "print", "scanner", "fax"],
+    TicketCategory.HARDWARE: ["laptop", "monitor", "keyboard", "mouse", "docking"],
+    TicketCategory.CLOUD_SERVICES: ["aws", "azure", "cloud", "s3", "ec2"],
+    TicketCategory.MOBILE_DEVICES: ["iphone", "android", "mobile", "tablet", "mdm"],
+    TicketCategory.TELEPHONY: ["phone", "voip", "teams call", "headset"],
+}
+
+CRITICAL_KEYWORDS = ["ehr", "patient", "clinical", "emergency", "down", "outage"]
+HIGH_KEYWORDS = ["security", "breach", "virus", "unauthorized"]
+
+
+def _keyword_pattern(keywords: list[str]) -> re.Pattern:
+    """Whole-word match for any keyword, allowing an s/es/ing/ed suffix."""
+    alternatives = "|".join(re.escape(kw) for kw in keywords)
+    return re.compile(rf"\b(?:{alternatives})(?:s|es|ing|ed)?\b", re.IGNORECASE)
+
+
+_CATEGORY_PATTERNS = {cat: _keyword_pattern(kws) for cat, kws in FALLBACK_KEYWORDS.items()}
+_CRITICAL_PATTERN = _keyword_pattern(CRITICAL_KEYWORDS)
+_HIGH_PATTERN = _keyword_pattern(HIGH_KEYWORDS)
 
 
 @dataclass
@@ -175,7 +207,7 @@ Respond in the following JSON format ONLY (no other text):
         Classify a support ticket and return structured result
         with routing and SLA information.
         """
-        start_time = time.time()
+        start_time = time.perf_counter()
 
         additional_context = ""
         if reporter_department:
@@ -195,7 +227,7 @@ Respond in the following JSON format ONLY (no other text):
 
             # Parse JSON response
             classification_data = self._parse_response(raw_response)
-            classification_time = (time.time() - start_time) * 1000
+            classification_time = (time.perf_counter() - start_time) * 1000
 
             category = TicketCategory(classification_data["category"])
             priority = TicketPriority(classification_data["priority"])
@@ -280,51 +312,48 @@ Respond in the following JSON format ONLY (no other text):
         if data["priority"] not in valid_priorities:
             raise ValueError(f"Invalid priority: {data['priority']}")
 
+        valid_severities = [s.value for s in TicketSeverity]
+        if data["severity"] not in valid_severities:
+            raise ValueError(f"Invalid severity: {data['severity']}")
+
         return data
 
     def _fallback_classification(
         self,
         title: str,
         description: str,
-        start_time: float,
+        start_time: Optional[float] = None,
     ) -> ClassificationResult:
-        """Rule-based fallback when AI classification fails."""
-        combined = f"{title} {description}".lower()
+        """Rule-based fallback when AI classification fails.
 
-        # Simple keyword-based classification
+        ``start_time`` is a ``time.perf_counter()`` reading taken when the
+        request began. Any value that is missing, zero or later than now is
+        ignored and the fallback's own duration is reported instead.
+        """
+        method_start = time.perf_counter()
+        combined = f"{title} {description}"
+
         category = TicketCategory.SOFTWARE
         priority = TicketPriority.MEDIUM
         severity = TicketSeverity.SEV3
 
-        keyword_map = {
-            TicketCategory.NETWORK: ["network", "wifi", "internet", "connectivity", "dns", "dhcp"],
-            TicketCategory.EMAIL: ["email", "outlook", "mailbox", "smtp", "exchange"],
-            TicketCategory.VPN: ["vpn", "remote access", "tunnel", "connection dropped"],
-            TicketCategory.EHR_SYSTEMS: ["ehr", "epic", "cerner", "clinical", "patient record", "emr"],
-            TicketCategory.ACTIVE_DIRECTORY: ["password", "login", "locked out", "active directory", "ad account"],
-            TicketCategory.PRINTING: ["printer", "print", "scanner", "fax"],
-            TicketCategory.HARDWARE: ["laptop", "monitor", "keyboard", "mouse", "docking"],
-            TicketCategory.SECURITY: ["virus", "malware", "phishing", "breach", "suspicious", "unauthorized"],
-            TicketCategory.CLOUD_SERVICES: ["aws", "azure", "cloud", "s3", "ec2"],
-            TicketCategory.MOBILE_DEVICES: ["iphone", "android", "mobile", "tablet", "mdm"],
-            TicketCategory.TELEPHONY: ["phone", "voip", "teams call", "headset"],
-        }
-
-        for cat, keywords in keyword_map.items():
-            if any(kw in combined for kw in keywords):
+        for cat, pattern in _CATEGORY_PATTERNS.items():
+            if pattern.search(combined):
                 category = cat
                 break
 
-        # Priority escalation for healthcare-critical keywords
-        if any(kw in combined for kw in ["ehr", "patient", "clinical", "emergency", "down", "outage"]):
+        if _CRITICAL_PATTERN.search(combined):
             priority = TicketPriority.CRITICAL
             severity = TicketSeverity.SEV1
-
-        elif any(kw in combined for kw in ["security", "breach", "virus", "unauthorized"]):
+        elif category == TicketCategory.SECURITY or _HIGH_PATTERN.search(combined):
             priority = TicketPriority.HIGH
             severity = TicketSeverity.SEV2
 
-        classification_time = (time.time() - start_time) * 1000
+        now = time.perf_counter()
+        if start_time is not None and 0 < start_time <= now:
+            classification_time = (now - start_time) * 1000
+        else:
+            classification_time = (now - method_start) * 1000
 
         return ClassificationResult(
             category=category,
