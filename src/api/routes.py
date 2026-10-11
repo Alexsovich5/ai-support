@@ -1,17 +1,14 @@
-#!/usr/bin/env python3
-"""
-API Route Definitions
-Project: AI-Powered Healthcare IT Support System
+"""REST and WebSocket routes.
 
-FastAPI route definitions for chat, ticket classification,
-knowledge base management, and system administration endpoints.
+Services are resolved from ``request.app.state``, where the application
+lifespan stores them.
 """
 
 import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
 
 from src.api.models import (
     ChatRequest,
@@ -29,20 +26,30 @@ logger = logging.getLogger("ai_support.api")
 router = APIRouter()
 
 
-def get_ai_engine():
-    """Dependency injection for AI engine."""
-    from src.main import app_state
-    if not app_state.ai_engine:
-        raise HTTPException(status_code=503, detail="AI engine not initialized")
-    return app_state.ai_engine
+MAX_BATCH_SIZE = 50
 
 
-def get_knowledge_base():
-    """Dependency injection for knowledge base."""
-    from src.main import app_state
-    if not app_state.knowledge_base:
-        raise HTTPException(status_code=503, detail="Knowledge base not initialized")
-    return app_state.knowledge_base
+def _service(request: Request, name: str, label: str):
+    service = getattr(request.app.state, name, None)
+    if service is None:
+        raise HTTPException(status_code=503, detail=f"{label} not initialized")
+    return service
+
+
+def get_ai_engine(request: Request):
+    return _service(request, "ai_engine", "AI engine")
+
+
+def get_knowledge_base(request: Request):
+    return _service(request, "knowledge_base", "Knowledge base")
+
+
+def get_classifier(request: Request):
+    return _service(request, "classifier", "Ticket classifier")
+
+
+def get_settings(request: Request):
+    return request.app.state.settings
 
 
 # -------------------------------------------------------------------
@@ -95,10 +102,10 @@ async def websocket_chat(
     department: Optional[str] = Query(None),
 ):
     """WebSocket endpoint for real-time chat sessions."""
-    from src.chat_handler import ChatHandler
-    from src.main import app_state
-
-    handler = ChatHandler(ai_engine=app_state.ai_engine)
+    handler = getattr(websocket.app.state, "chat_handler", None)
+    if handler is None:
+        await websocket.close(code=1013)
+        return
     await handler.handle_connection(
         websocket=websocket,
         user_id=user_id,
@@ -111,15 +118,11 @@ async def websocket_chat(
 # -------------------------------------------------------------------
 
 @router.post("/classify", response_model=ClassifyResponse)
-async def classify_ticket(request: ClassifyRequest):
+async def classify_ticket(request: ClassifyRequest, classifier=Depends(get_classifier)):
     """
     Classify an IT support ticket into category, priority, and severity.
     Returns routing information and SLA targets.
     """
-    from src.ticket_classifier import TicketClassifier
-
-    classifier = TicketClassifier()
-
     result = await classifier.classify(
         title=request.title,
         description=request.description,
@@ -149,14 +152,16 @@ async def classify_ticket(request: ClassifyRequest):
 
 
 @router.post("/classify/batch")
-async def batch_classify_tickets(tickets: list[ClassifyRequest]):
+async def batch_classify_tickets(
+    tickets: list[ClassifyRequest],
+    classifier=Depends(get_classifier),
+):
     """Classify multiple tickets in a single request."""
-    from src.ticket_classifier import TicketClassifier
+    if len(tickets) > MAX_BATCH_SIZE:
+        raise HTTPException(
+            status_code=400, detail=f"Maximum {MAX_BATCH_SIZE} tickets per batch"
+        )
 
-    if len(tickets) > 50:
-        raise HTTPException(status_code=400, detail="Maximum 50 tickets per batch")
-
-    classifier = TicketClassifier()
     ticket_dicts = [
         {
             "title": t.title,
@@ -184,13 +189,17 @@ async def batch_classify_tickets(tickets: list[ClassifyRequest]):
 async def search_knowledge_base(
     request: KnowledgeSearchRequest,
     kb=Depends(get_knowledge_base),
+    settings=Depends(get_settings),
 ):
-    """Search the IT knowledge base for relevant articles."""
+    """Search the IT knowledge base; min_relevance defaults to the active profile."""
+    min_relevance = request.min_relevance
+    if min_relevance is None:
+        min_relevance = settings.retrieval.min_relevance_score
     results = await kb.search(
         query=request.query,
         n_results=request.max_results,
         category=request.category,
-        min_relevance=request.min_relevance,
+        min_relevance=min_relevance,
     )
 
     return KnowledgeSearchResponse(
@@ -235,9 +244,13 @@ async def knowledge_base_stats(kb=Depends(get_knowledge_base)):
 # -------------------------------------------------------------------
 
 @router.get("/stats")
-async def system_stats(ai_engine=Depends(get_ai_engine)):
-    """Return comprehensive system statistics."""
+async def system_stats(
+    ai_engine=Depends(get_ai_engine),
+    classifier=Depends(get_classifier),
+):
+    """Return engine and classifier counters."""
     return {
         "engine_stats": ai_engine.get_stats(),
+        "classifier_stats": classifier.get_stats(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

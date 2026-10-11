@@ -73,6 +73,21 @@ class ChatHandler:
         """Start background task to clean up stale sessions."""
         self._cleanup_task = asyncio.create_task(self._cleanup_stale_sessions())
 
+    async def stop_cleanup_loop(self) -> None:
+        """Cancel the cleanup task and wait for it to finish."""
+        task = self._cleanup_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    @property
+    def cleanup_task(self) -> Optional[asyncio.Task]:
+        return self._cleanup_task
+
     async def handle_connection(
         self,
         websocket: WebSocket,

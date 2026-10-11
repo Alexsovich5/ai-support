@@ -247,7 +247,7 @@ Conventions:
   - it adds the health endpoints, with ready meaning initialised and seeded.
 
   The routes use `app.state` dependencies. `KnowledgeSearchRequest.min_relevance` defaults to None, which means the profile value.
-- **Files.** modify: `src/main.py`, `src/api/routes.py`, `src/api/models.py`. create: `tests/conftest.py` and `tests/test_api.py`. The `settings` fixture uses `tmp_path` for `persist_directory`, a unique collection name, and `KB_SEED_DIR` pointing at a temp copy of `data/kb`. The `client` fixture is `with TestClient(create_app(settings)) as client: yield client`, so the lifespan runs.
+- **Files.** modify: `src/main.py`, `src/api/routes.py`, `src/api/models.py`, and `src/chat_handler.py` (adds `stop_cleanup_loop()` and a read-only `cleanup_task` property, so the lifespan cancels the task without reaching into private state). create: `tests/conftest.py` and `tests/test_api.py`. The `settings` fixture uses `tmp_path` for `persist_directory`, a unique collection name, and `KB_SEED_DIR` pointing at a temp copy of `data/kb`. The `client` fixture is `with TestClient(create_app(settings)) as client: yield client`, so the lifespan runs.
 - **Tests first.**
   - `/health/live` returns 200.
   - `/health/ready` returns 200 with `kb_chunks > 0`, from the startup seed.

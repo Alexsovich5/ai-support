@@ -1,10 +1,4 @@
-#!/usr/bin/env python3
-"""
-Pydantic Request/Response Models
-Project: AI-Powered Healthcare IT Support System
-
-Data validation models for all API endpoints using Pydantic v2.
-"""
+"""Pydantic request and response models for the API endpoints."""
 
 from typing import Optional
 
@@ -156,11 +150,11 @@ class KnowledgeSearchRequest(BaseModel):
         None,
         description="Filter by knowledge category",
     )
-    min_relevance: float = Field(
-        0.3,
+    min_relevance: Optional[float] = Field(
+        None,
         ge=0.0,
         le=1.0,
-        description="Minimum relevance score threshold",
+        description="Minimum relevance score; None uses the active retrieval profile",
     )
 
 
