@@ -304,7 +304,7 @@ Conventions:
   - It reuses `HashingEmbeddings` and the extractive answer logic.
   - When the prompt contains the marker `### TICKET_CLASSIFICATION_JSON ###`, it returns classifier JSON derived from the keyword map.
   - `/v1/embeddings` accepts `input` as `str` or `list[str]`, and returns 400 for token-ID arrays.
-- **Files.** create: `stubs/__init__.py`, `stubs/openai_stub.py`, `tests/test_openai_stub.py`.
+- **Files.** create: `stubs/__init__.py`, `stubs/openai_stub.py`, `tests/test_openai_stub.py`. modify: `src/ticket_classifier.py` (the fallback's keyword rules move into a module-level `keyword_rules(text)` that the fallback and the stub share).
 - **Tests first.** Build the clients through `llm_factory` with `sync = TestClient(stub_app, base_url="http://stub")` and `async_ = httpx.AsyncClient(transport=httpx.ASGITransport(app=stub_app), base_url="http://stub")`, and with settings `openai`, base URL `http://stub/v1` and key `sk-test`. The tests check the following:
   - `ChatOpenAI.invoke` and `ainvoke` both return content.
   - `OpenAIEmbeddings.embed_documents` and `aembed_documents` return 512-dimensional vectors equal to `HashingEmbeddings` on the same text, which proves raw strings were sent.

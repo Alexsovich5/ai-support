@@ -118,6 +118,26 @@ _CRITICAL_PATTERN = _keyword_pattern(CRITICAL_KEYWORDS)
 _HIGH_PATTERN = _keyword_pattern(HIGH_KEYWORDS)
 
 
+def keyword_rules(text: str) -> tuple["TicketCategory", "TicketPriority", "TicketSeverity"]:
+    """Category, priority and severity chosen by the fallback keyword rules.
+
+    The first category in ``FALLBACK_KEYWORDS`` with a match wins (software
+    when none match). Critical keywords give critical/sev1; otherwise a
+    security category or a high keyword gives high/sev2; else medium/sev3.
+    """
+    category = TicketCategory.SOFTWARE
+    for cat, pattern in _CATEGORY_PATTERNS.items():
+        if pattern.search(text):
+            category = cat
+            break
+
+    if _CRITICAL_PATTERN.search(text):
+        return category, TicketPriority.CRITICAL, TicketSeverity.SEV1
+    if category == TicketCategory.SECURITY or _HIGH_PATTERN.search(text):
+        return category, TicketPriority.HIGH, TicketSeverity.SEV2
+    return category, TicketPriority.MEDIUM, TicketSeverity.SEV3
+
+
 @dataclass
 class ClassificationResult:
     category: TicketCategory
@@ -345,23 +365,7 @@ class TicketClassifier:
         ignored and the fallback's own duration is reported instead.
         """
         method_start = time.perf_counter()
-        combined = f"{title} {description}"
-
-        category = TicketCategory.SOFTWARE
-        priority = TicketPriority.MEDIUM
-        severity = TicketSeverity.SEV3
-
-        for cat, pattern in _CATEGORY_PATTERNS.items():
-            if pattern.search(combined):
-                category = cat
-                break
-
-        if _CRITICAL_PATTERN.search(combined):
-            priority = TicketPriority.CRITICAL
-            severity = TicketSeverity.SEV1
-        elif category == TicketCategory.SECURITY or _HIGH_PATTERN.search(combined):
-            priority = TicketPriority.HIGH
-            severity = TicketSeverity.SEV2
+        category, priority, severity = keyword_rules(f"{title} {description}")
 
         now = time.perf_counter()
         if start_time is not None and 0 < start_time <= now:
