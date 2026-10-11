@@ -1,11 +1,10 @@
-# AI Prompt Templates
-# Project: AI-Powered Healthcare IT Support System
+# Prompt templates for the chat engine and the ticket classifier.
 
 system_prompts:
   default: |
     You are an AI IT Support Assistant for a healthcare organization.
-    Your role is to help resolve IT issues efficiently while maintaining strict
-    HIPAA compliance.
+    Your role is to help resolve IT issues efficiently and to
+    never repeat patient identifiers.
 
     Core Rules:
     1. NEVER request, store, or repeat any Protected Health Information (PHI)
@@ -40,7 +39,21 @@ system_prompts:
     3. DO NOT ask for credentials or sensitive access information
     4. Recommend immediate containment steps if applicable
     5. Always recommend formal escalation to the Security Operations team
-    6. Document the timeline of events
+    6. Document the sequence of events
+
+chat:
+  user_template: |
+    Use the knowledge base context below to answer the question. If the context
+    does not cover the question, say so and suggest contacting the service desk.
+
+    Knowledge base context:
+    {context}
+
+    Conversation so far:
+    {history}
+
+    Question:
+    {question}
 
 classification:
   system_prompt: |
@@ -50,42 +63,31 @@ classification:
     Healthcare-specific rules:
     - EHR/clinical system issues affecting patient care are always CRITICAL
     - Security incidents are always HIGH priority or above
-    - Issues affecting multiple departments escalate by one priority level
-    - After-hours issues for clinical systems are CRITICAL
 
     Categories: network, email, vpn, ehr_systems, active_directory, printing,
     hardware, software, security, cloud_services, mobile_devices, telephony
 
-knowledge_search:
-  query_refinement: |
-    Refine the following IT support query to improve knowledge base search results.
-    Extract key technical terms, system names, and error codes.
-    Return a refined search query optimized for semantic similarity matching.
+  user_template: |
+    Classify this IT support ticket.
 
-    Original query: {query}
-    Refined query:
+    Title: {title}
+    Description: {description}
+    Additional context: {additional_context}
+
+    ### TICKET_CLASSIFICATION_JSON ###
+    Respond with JSON only:
+    {{"category": "<network|email|vpn|ehr_systems|active_directory|printing|hardware|software|security|cloud_services|mobile_devices|telephony>",
+      "priority": "<critical|high|medium|low>", "severity": "<sev1|sev2|sev3|sev4>",
+      "confidence": <0.0-1.0>, "suggested_tags": ["..."], "reasoning": "<short>", "requires_escalation": <true|false>}}
 
 escalation:
   threshold_warning: |
-    I want to make sure you get the best help possible. Based on the complexity
-    of your issue, I'd recommend connecting you with a human support agent who
-    can provide more specialized assistance.
-
-    Would you like me to create a support ticket and route it to the appropriate team?
-
-  ticket_summary: |
-    Generate a concise support ticket summary from this conversation:
-    - Issue category and priority
-    - Steps already attempted
-    - Current status
-    - Recommended next steps for the support agent
-
-    Conversation:
-    {conversation}
+    I want to make sure you get the best help possible. This issue looks like
+    it needs a human support agent, so please contact the service desk and
+    mention what you have already tried.
 
 phi_detection:
   warning_message: |
-    I noticed some information in your message that may contain protected health
-    information. For HIPAA compliance, I've filtered that content. Please describe
-    your IT issue without including patient names, medical record numbers, or
-    other identifying health information.
+    I've filtered what looked like patient identifiers from your message.
+    Please describe your IT issue without including patient names, medical
+    record numbers, or other identifying health information.
