@@ -361,7 +361,7 @@ Conventions:
   - a concrete description;
   - Status: implemented features mapped to code and tests, and the limitations from the SPEC, including "OpenAI is replaced by a local stub/offline fakes in all tests; the real API is never called by the test suite";
   - Built with: the pinned versions and the base-image digest note;
-  - Running it: `docker compose up`, then the smoke command `curl -s localhost:8000/api/v1/knowledge/search -H 'content-type: application/json' -d '{"query":"vpn keeps disconnecting","min_relevance":0.15}'`. The stack seeds itself, and `make seed` re-seeds it through the API;
+  - Running it: `docker compose up`, then the smoke command `curl -s localhost:22700/api/v1/knowledge/search -H 'content-type: application/json' -d '{"query":"vpn keeps disconnecting","min_relevance":0.15}'` (host port 22700, which the compose file publishes for container port 8000). The stack seeds itself, and `make seed` re-seeds it through the API;
   - Tests;
   - a Layout tree generated from `git ls-files`.
 
