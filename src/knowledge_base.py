@@ -17,9 +17,10 @@ from pathlib import Path
 from typing import Optional
 
 import chromadb
-from chromadb.config import Settings
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
+from chromadb.api import ClientAPI
+from chromadb.config import Settings as ChromaSettings
+from langchain_core.embeddings import Embeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 logger = logging.getLogger("ai_support.knowledge_base")
 
@@ -38,9 +39,7 @@ class Document:
 
     def __post_init__(self):
         if not self.doc_id:
-            self.doc_id = hashlib.sha256(
-                f"{self.source}:{self.content[:200]}".encode()
-            ).hexdigest()[:16]
+            self.doc_id = hashlib.sha256(self.source.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
@@ -55,12 +54,9 @@ class SearchResult:
 class KnowledgeBaseManager:
     """
     Vector store manager for healthcare IT knowledge base.
-    Uses ChromaDB for embedding storage and semantic search,
-    with OpenAI embeddings for document vectorization.
+    Uses a persistent ChromaDB collection for storage and cosine search.
+    The embedding model is injected, so Chroma never computes embeddings itself.
     """
-
-    CHUNK_SIZE = 1000
-    CHUNK_OVERLAP = 200
 
     CATEGORIES = [
         "network",
@@ -79,26 +75,25 @@ class KnowledgeBaseManager:
 
     def __init__(
         self,
+        embeddings: Embeddings,
         persist_directory: str = "./data/chroma",
-        collection_name: str = "healthcare_it_knowledge",
-        embedding_model: str = "text-embedding-3-small",
+        collection_name: str = "it_support_kb",
+        chunk_size: int = 1000,
+        chunk_overlap: int = 200,
+        client: Optional[ClientAPI] = None,
     ):
         self.persist_directory = persist_directory
         self.collection_name = collection_name
         self.document_count = 0
-
-        self.embeddings = OpenAIEmbeddings(
-            model=embedding_model,
-            chunk_size=500,
-        )
+        self.embeddings = embeddings
 
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=self.CHUNK_SIZE,
-            chunk_overlap=self.CHUNK_OVERLAP,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
             separators=["\n\n", "\n", ". ", " ", ""],
         )
 
-        self._client = None
+        self._client = client
         self._collection = None
 
         logger.info(
@@ -108,24 +103,24 @@ class KnowledgeBaseManager:
         )
 
     async def initialize(self) -> None:
-        """Initialize ChromaDB client and collection."""
+        """Open the persistent Chroma client and the cosine collection."""
         try:
-            self._client = chromadb.Client(
-                Settings(
-                    chroma_db_impl="duckdb+parquet",
-                    persist_directory=self.persist_directory,
-                    anonymized_telemetry=False,
+            if self._client is None:
+                Path(self.persist_directory).mkdir(parents=True, exist_ok=True)
+                self._client = chromadb.PersistentClient(
+                    path=self.persist_directory,
+                    settings=ChromaSettings(anonymized_telemetry=False),
                 )
-            )
 
             self._collection = self._client.get_or_create_collection(
                 name=self.collection_name,
                 metadata={"hnsw:space": "cosine"},
+                embedding_function=None,
             )
 
             self.document_count = self._collection.count()
             logger.info(
-                "Knowledge base initialized: %d documents loaded",
+                "Knowledge base initialized: %d chunks loaded",
                 self.document_count,
             )
 
@@ -141,8 +136,9 @@ class KnowledgeBaseManager:
         if not self._collection:
             raise RuntimeError("Knowledge base not initialized")
 
-        # Split document into chunks
         chunks = self.text_splitter.split_text(document.content)
+        if not chunks:
+            raise ValueError(f"document '{document.source}' has no content")
         logger.info(
             "Ingesting document: source=%s, chunks=%d",
             document.source,
@@ -169,7 +165,8 @@ class KnowledgeBaseManager:
                 **document.metadata,
             })
 
-        # Upsert into ChromaDB
+        # Replace any earlier version of this source, then write the new chunks
+        self._collection.delete(where={"source": document.source})
         self._collection.upsert(
             ids=ids,
             embeddings=chunk_embeddings,
@@ -252,10 +249,14 @@ class KnowledgeBaseManager:
         if category:
             where_filter = {"category": category}
 
+        available = self._collection.count()
+        if available == 0:
+            return []
+
         try:
             results = self._collection.query(
                 query_embeddings=query_embedding,
-                n_results=min(n_results, self.document_count) if self.document_count > 0 else n_results,
+                n_results=min(n_results, available),
                 where=where_filter,
                 include=["documents", "metadatas", "distances"],
             )
@@ -331,6 +332,7 @@ class KnowledgeBaseManager:
         except Exception:
             pass
 
+        self.document_count = self._collection.count()
         return {
             "total_chunks": self.document_count,
             "categories": categories,
