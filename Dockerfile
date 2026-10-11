@@ -22,5 +22,7 @@ FROM base AS runtime
 
 COPY src ./src
 COPY config ./config
+COPY stubs ./stubs
+COPY data/kb ./data/kb
 EXPOSE 8000
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

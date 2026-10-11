@@ -334,7 +334,8 @@ Conventions:
     - `depends_on: {openai-stub: {condition: service_healthy}}`
     - healthcheck `python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"`
   - **`tester`**, under profile `test`, uses the dev image with `STACK_URL=http://api:8000`.
-- **Files.** modify: `docker-compose.yml`, `Makefile` (targets `up`, `seed`, `integration`, `down`). `seed` is `docker compose exec -T api python -m src.ingest data/kb --api-url http://localhost:8000`, which goes through the API process. create: `tests/integration/__init__.py`, `tests/integration/test_stack.py` (skipped unless `STACK_URL` is set).
+  - The project name is `ai-support`; the services share a network on subnet `172.77.0.0/24`, and `api` publishes container port 8000 on host port 22700.
+- **Files.** modify: `docker-compose.yml`, `Makefile` (targets `up`, `seed`, `integration`, `down`), and `Dockerfile` (the runtime stage also copies `stubs/` and `data/kb/`, so the stub command and `KB_SEED_DIR=/app/data/kb` work from the runtime image). `seed` is `docker compose exec -T api python -m src.ingest data/kb --api-url http://localhost:8000`, which goes through the API process. create: `tests/integration/__init__.py`, `tests/integration/test_stack.py` (skipped unless `STACK_URL` is set).
 - **Tests first.** Against the live stack, check the following:
   - Ready returns 200 with `kb_chunks > 0`.
   - A chat about VPN cites `vpn-disconnects.md`.
