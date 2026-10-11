@@ -55,7 +55,7 @@ async def lifespan(app: FastAPI):
         settings=settings,
         prompts=prompts,
     )
-    chat_handler = ChatHandler(ai_engine=engine)
+    chat_handler = ChatHandler(ai_engine=engine, chat_config=settings.chat, prompts=prompts)
 
     app.state.knowledge_base = kb
     app.state.ai_engine = engine

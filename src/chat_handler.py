@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 WebSocket Chat Handler
-Project: AI-Powered Healthcare IT Support System
 
 Manages real-time WebSocket chat sessions for the AI support system.
-Handles connection lifecycle, message routing, typing indicators,
-and session persistence with HIPAA-compliant logging.
+Handles connection lifecycle, message routing, typing indicators and
+idle timeouts. One handler is shared by every connection of an app, so
+the concurrent-session limit and the active-session count are app-wide.
+Messages are logged by session id and length only, never by content.
 """
 
 import asyncio
@@ -15,10 +16,12 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
+
+from src.config import ChatConfig
 
 logger = logging.getLogger("ai_support.chat")
 
@@ -50,6 +53,21 @@ class ChatSession:
     is_active: bool = True
     department: Optional[str] = None
     user_name: Optional[str] = None
+    role: Optional[str] = None
+
+
+PHI_NOTICE = (
+    "We filtered possible patient identifiers from your message. "
+    "Please avoid sharing patient information in support chats."
+)
+DEFAULT_ESCALATION_TEXT = (
+    "This issue needs a human support agent. Please contact the service desk "
+    "and mention what you have already tried."
+)
+PROCESSING_ERROR_TEXT = (
+    "I encountered an issue processing your request. Please try rephrasing "
+    "or contact the service desk."
+)
 
 
 class ChatHandler:
@@ -58,16 +76,26 @@ class ChatHandler:
     Handles multiple concurrent sessions with graceful lifecycle management.
     """
 
-    MAX_MESSAGE_LENGTH = 4096
-    SESSION_TIMEOUT_SECONDS = 1800  # 30 minutes
-    MAX_CONCURRENT_SESSIONS = 200
+    CLEANUP_INTERVAL_SECONDS = 300
 
-    def __init__(self, ai_engine):
+    def __init__(
+        self,
+        ai_engine,
+        chat_config: ChatConfig,
+        prompts: Optional[Mapping[str, Any]] = None,
+    ):
         self.ai_engine = ai_engine
+        self.max_message_length = chat_config.max_message_length
+        self.session_timeout_seconds = chat_config.session_timeout_seconds
+        self.max_concurrent_sessions = chat_config.max_concurrent_sessions
+        escalation = (prompts or {}).get("escalation", {}).get("threshold_warning")
+        self.escalation_text = (
+            " ".join(escalation.split()) if escalation else DEFAULT_ESCALATION_TEXT
+        )
         self._sessions: dict[str, ChatSession] = {}
         self._cleanup_task: Optional[asyncio.Task] = None
 
-        logger.info("Chat handler initialized: max_sessions=%d", self.MAX_CONCURRENT_SESSIONS)
+        logger.info("Chat handler initialized: max_sessions=%d", self.max_concurrent_sessions)
 
     async def start_cleanup_loop(self) -> None:
         """Start background task to clean up stale sessions."""
@@ -94,6 +122,7 @@ class ChatHandler:
         user_id: str,
         department: Optional[str] = None,
         user_name: Optional[str] = None,
+        role: Optional[str] = None,
     ) -> None:
         """Handle a complete WebSocket connection lifecycle."""
         await websocket.accept()
@@ -105,9 +134,10 @@ class ChatHandler:
             websocket=websocket,
             department=department,
             user_name=user_name,
+            role=role,
         )
 
-        if len(self._sessions) >= self.MAX_CONCURRENT_SESSIONS:
+        if len(self._sessions) >= self.max_concurrent_sessions:
             await self._send_message(
                 websocket,
                 MessageType.ERROR,
@@ -152,7 +182,8 @@ class ChatHandler:
                 pass
         finally:
             session.is_active = False
-            del self._sessions[session_id]
+            self._sessions.pop(session_id, None)
+            await self._close(websocket)
             logger.info(
                 "Chat session ended: session_id=%s, messages=%d",
                 session_id,
@@ -165,13 +196,13 @@ class ChatHandler:
             try:
                 raw_data = await asyncio.wait_for(
                     session.websocket.receive_text(),
-                    timeout=self.SESSION_TIMEOUT_SECONDS,
+                    timeout=self.session_timeout_seconds,
                 )
             except asyncio.TimeoutError:
                 await self._send_message(
                     session.websocket,
-                    MessageType.SYSTEM,
-                    {"message": "Session timed out due to inactivity."},
+                    MessageType.SESSION_END,
+                    {"message": "Session closed due to inactivity."},
                 )
                 break
 
@@ -185,8 +216,16 @@ class ChatHandler:
                 )
                 continue
 
+            if not isinstance(data, dict):
+                await self._send_message(
+                    session.websocket,
+                    MessageType.ERROR,
+                    {"error": "Invalid message format. Expected a JSON object."},
+                )
+                continue
+
             message_type = data.get("type", "user_message")
-            content = data.get("content", "").strip()
+            content = str(data.get("content") or "").strip()
 
             if message_type == "user_message":
                 await self._handle_user_message(session, content)
@@ -209,11 +248,11 @@ class ChatHandler:
         if not content:
             return
 
-        if len(content) > self.MAX_MESSAGE_LENGTH:
+        if len(content) > self.max_message_length:
             await self._send_message(
                 session.websocket,
                 MessageType.ERROR,
-                {"error": f"Message too long. Maximum {self.MAX_MESSAGE_LENGTH} characters."},
+                {"error": f"Message too long. Maximum {self.max_message_length} characters."},
             )
             return
 
@@ -231,7 +270,7 @@ class ChatHandler:
             # Process through AI engine
             user_context = {
                 "department": session.department,
-                "role": "staff",
+                "role": session.role,
                 "user_id": session.user_id,
             }
 
@@ -257,9 +296,7 @@ class ChatHandler:
             }
 
             if response.phi_detected:
-                response_data["warning"] = (
-                    "PHI was detected and redacted from the conversation for HIPAA compliance."
-                )
+                response_data["warning"] = PHI_NOTICE
 
             await self._send_message(
                 session.websocket,
@@ -267,13 +304,20 @@ class ChatHandler:
                 response_data,
             )
 
+            if response.phi_detected:
+                await self._send_message(
+                    session.websocket,
+                    MessageType.SYSTEM,
+                    {"message": PHI_NOTICE},
+                )
+
             # Auto-escalation if confidence is too low
             if response.escalation_recommended:
                 await self._send_message(
                     session.websocket,
                     MessageType.ESCALATION,
                     {
-                        "message": "Based on the complexity of your issue, I recommend connecting you with a human support agent.",
+                        "message": self.escalation_text,
                         "reason": "low_confidence",
                         "confidence": response.confidence,
                     },
@@ -293,7 +337,7 @@ class ChatHandler:
             await self._send_message(
                 session.websocket,
                 MessageType.ERROR,
-                {"error": "I encountered an issue processing your request. Please try rephrasing or contact the help desk at ext. 4500."},
+                {"error": PROCESSING_ERROR_TEXT},
             )
 
     async def _handle_feedback(self, session: ChatSession, data: dict) -> None:
@@ -327,8 +371,7 @@ class ChatHandler:
             session.websocket,
             MessageType.ESCALATION,
             {
-                "message": "Your request has been escalated to a human support agent. Expected wait time: 5-10 minutes.",
-                "ticket_created": True,
+                "message": self.escalation_text,
                 "reason": reason or "user_requested",
             },
         )
@@ -354,10 +397,19 @@ class ChatHandler:
         except Exception as e:
             logger.warning("Failed to send message: %s", str(e))
 
+    @staticmethod
+    async def _close(websocket: WebSocket, code: int = 1000) -> None:
+        if websocket.client_state != WebSocketState.CONNECTED:
+            return
+        try:
+            await websocket.close(code=code)
+        except Exception as e:
+            logger.debug("Close failed: %s", str(e))
+
     async def _cleanup_stale_sessions(self) -> None:
         """Periodically clean up inactive sessions."""
         while True:
-            await asyncio.sleep(300)  # Check every 5 minutes
+            await asyncio.sleep(self.CLEANUP_INTERVAL_SECONDS)
 
             now = datetime.now(timezone.utc)
             stale_sessions = []
@@ -366,11 +418,11 @@ class ChatHandler:
                 last_activity = datetime.fromisoformat(session.last_activity)
                 idle_seconds = (now - last_activity).total_seconds()
 
-                if idle_seconds > self.SESSION_TIMEOUT_SECONDS:
+                if idle_seconds > self.session_timeout_seconds:
                     stale_sessions.append(session_id)
 
             for session_id in stale_sessions:
-                session = self._sessions.get(session_id)
+                session = self._sessions.pop(session_id, None)
                 if session:
                     try:
                         await self._send_message(
@@ -382,7 +434,6 @@ class ChatHandler:
                     except Exception:
                         pass
                     session.is_active = False
-                    del self._sessions[session_id]
 
             if stale_sessions:
                 logger.info("Cleaned up %d stale sessions", len(stale_sessions))

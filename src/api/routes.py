@@ -100,8 +100,9 @@ async def websocket_chat(
     websocket: WebSocket,
     user_id: str,
     department: Optional[str] = Query(None),
+    role: Optional[str] = Query(None),
 ):
-    """WebSocket endpoint for real-time chat sessions."""
+    """WebSocket endpoint for real-time chat sessions on the app's shared handler."""
     handler = getattr(websocket.app.state, "chat_handler", None)
     if handler is None:
         await websocket.close(code=1013)
@@ -110,6 +111,7 @@ async def websocket_chat(
         websocket=websocket,
         user_id=user_id,
         department=department,
+        role=role,
     )
 
 

@@ -276,7 +276,7 @@ Conventions:
   - Replace the "for HIPAA compliance" and "HIPAA-compliant logging" wording with "filtered possible patient identifiers".
   - Use `escalation.threshold_warning` as the escalation text, and drop `ticket_created` from the escalation reply.
   - Pass the WS `role` query parameter through instead of the hardcoded `"staff"`.
-- **Files.** modify: `src/chat_handler.py`, `src/api/routes.py`. create: `tests/test_websocket.py`.
+- **Files.** modify: `src/chat_handler.py`, `src/api/routes.py`, and `src/main.py` (the lifespan passes `settings.chat` and the prompts to the handler). create: `tests/test_websocket.py`.
 - **Tests first.** The tests use `client.websocket_connect("/api/v1/chat/ws/u1")` and check the following:
   - The first message is `session_start`.
   - A `user_message` yields `typing_start`, `typing_stop` and then `ai_response` with sources.
