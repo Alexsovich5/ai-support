@@ -2,7 +2,6 @@
 """
 RAG Knowledge Base Manager
 Project: AI-Powered Healthcare IT Support System
-Timeline: April 2024 - June 2024
 
 Manages the vector store knowledge base for Retrieval-Augmented Generation.
 Handles document ingestion, embedding generation, and semantic search for

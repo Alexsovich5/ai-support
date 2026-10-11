@@ -2,7 +2,6 @@
 """
 API Route Definitions
 Project: AI-Powered Healthcare IT Support System
-Timeline: April 2024 - June 2024
 
 FastAPI route definitions for chat, ticket classification,
 knowledge base management, and system administration endpoints.

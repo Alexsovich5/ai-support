@@ -2,7 +2,6 @@
 """
 Pydantic Request/Response Models
 Project: AI-Powered Healthcare IT Support System
-Timeline: April 2024 - June 2024
 
 Data validation models for all API endpoints using Pydantic v2.
 """
