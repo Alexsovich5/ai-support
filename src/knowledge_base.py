@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
 """
-RAG Knowledge Base Manager
-Project: AI-Powered Healthcare IT Support System
+RAG knowledge base manager.
 
-Manages the vector store knowledge base for Retrieval-Augmented Generation.
-Handles document ingestion, embedding generation, and semantic search for
-healthcare IT support documentation.
+Manages the vector store knowledge base for retrieval-augmented generation:
+document ingestion, embedding generation and similarity search over IT
+support articles. Article text, titles and search queries pass through the
+PHI filter before they are embedded or stored, and failures of the store are
+raised as ``KnowledgeBaseError`` instead of being reported as "no results".
 """
 
 import hashlib
@@ -22,7 +22,13 @@ from chromadb.config import Settings as ChromaSettings
 from langchain_core.embeddings import Embeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from src.phi_filter import WITHHELD_KIND, redact
+
 logger = logging.getLogger("ai_support.knowledge_base")
+
+
+class KnowledgeBaseError(RuntimeError):
+    """The vector store could not complete a search or a statistics read."""
 
 
 @dataclass
@@ -125,7 +131,7 @@ class KnowledgeBaseManager:
             )
 
         except Exception as e:
-            logger.error("Failed to initialize knowledge base: %s", str(e))
+            logger.error("Failed to initialize knowledge base: %s", type(e).__name__)
             raise
 
     async def ingest_document(self, document: Document) -> dict:
@@ -136,7 +142,19 @@ class KnowledgeBaseManager:
         if not self._collection:
             raise RuntimeError("Knowledge base not initialized")
 
-        chunks = self.text_splitter.split_text(document.content)
+        content = redact(document.content)
+        title = redact(document.title)
+        if WITHHELD_KIND in content.found or WITHHELD_KIND in title.found:
+            raise ValueError(f"document '{document.source}' could not be checked for patient identifiers")
+        phi_found = list(dict.fromkeys(content.found + title.found))
+        if phi_found:
+            logger.warning(
+                "Patient identifiers redacted from article: source=%s kinds=%s",
+                document.source,
+                ",".join(phi_found),
+            )
+
+        chunks = self.text_splitter.split_text(content.text)
         if not chunks:
             raise ValueError(f"document '{document.source}' has no content")
         logger.info(
@@ -157,7 +175,7 @@ class KnowledgeBaseManager:
             metadatas.append({
                 "source": document.source,
                 "category": document.category,
-                "title": document.title,
+                "title": title.text,
                 "chunk_index": i,
                 "total_chunks": len(chunks),
                 "doc_id": document.doc_id,
@@ -181,51 +199,23 @@ class KnowledgeBaseManager:
             "chunks_created": len(chunks),
             "total_documents": self.document_count,
             "source": document.source,
+            "phi_redacted": phi_found,
         }
 
         logger.info("Document ingested: %s", json.dumps(result))
         return result
 
-    async def ingest_directory(
-        self,
-        directory: str,
-        category: str = "general",
-        file_extensions: list[str] = None,
-    ) -> dict:
-        """Batch ingest all documents from a directory."""
-        if file_extensions is None:
-            file_extensions = [".md", ".txt", ".rst", ".html"]
+    async def ingest_directory(self, directory: str, category: str = "general") -> dict:
+        """Batch ingest a directory through the bounded, link-refusing walker in ``src.ingest``."""
+        from src.ingest import ingest_directory
 
-        dir_path = Path(directory)
-        if not dir_path.exists():
-            raise FileNotFoundError(f"Directory not found: {directory}")
-
-        results = {"total_files": 0, "total_chunks": 0, "errors": []}
-
-        for ext in file_extensions:
-            for file_path in dir_path.rglob(f"*{ext}"):
-                try:
-                    content = file_path.read_text(encoding="utf-8")
-                    doc = Document(
-                        content=content,
-                        source=str(file_path.relative_to(dir_path)),
-                        category=category,
-                        title=file_path.stem.replace("_", " ").replace("-", " ").title(),
-                    )
-                    result = await self.ingest_document(doc)
-                    results["total_files"] += 1
-                    results["total_chunks"] += result["chunks_created"]
-                except Exception as e:
-                    results["errors"].append({"file": str(file_path), "error": str(e)})
-                    logger.error("Error ingesting %s: %s", file_path, str(e))
-
+        results = await ingest_directory(self, directory, category)
         logger.info(
             "Directory ingestion complete: files=%d, chunks=%d, errors=%d",
             results["total_files"],
             results["total_chunks"],
             len(results["errors"]),
         )
-
         return results
 
     async def search(
@@ -236,13 +226,14 @@ class KnowledgeBaseManager:
         min_relevance: float = 0.3,
     ) -> list[dict]:
         """
-        Semantic search across the knowledge base.
-        Returns ranked results with relevance scores.
+        Similarity search across the knowledge base.
+        Returns ranked results with relevance scores. The query is PHI-redacted
+        before it is embedded; store errors raise ``KnowledgeBaseError``.
         """
         if not self._collection:
-            return []
+            raise KnowledgeBaseError("knowledge base not initialized")
 
-        # Generate query embedding
+        query = redact(query).text
         query_embedding = await self._generate_embeddings([query])
 
         where_filter = None
@@ -261,8 +252,8 @@ class KnowledgeBaseManager:
                 include=["documents", "metadatas", "distances"],
             )
         except Exception as e:
-            logger.error("Search failed: %s", str(e))
-            return []
+            logger.error("Search failed: %s", type(e).__name__)
+            raise KnowledgeBaseError("search failed") from None
 
         search_results = []
         if results and results["documents"]:
@@ -286,8 +277,8 @@ class KnowledgeBaseManager:
                 })
 
         logger.info(
-            "Search completed: query='%s...', results=%d",
-            query[:50],
+            "Search completed: query_length=%d, results=%d",
+            len(query),
             len(search_results),
         )
 
@@ -314,30 +305,29 @@ class KnowledgeBaseManager:
             return False
 
         except Exception as e:
-            logger.error("Failed to delete document %s: %s", doc_id, str(e))
+            logger.error("Failed to delete document %s: %s", doc_id, type(e).__name__)
             return False
 
     async def get_stats(self) -> dict:
         """Return knowledge base statistics."""
         if not self._collection:
-            return {"status": "not_initialized"}
+            raise KnowledgeBaseError("knowledge base not initialized")
 
         categories = {}
         try:
             all_docs = self._collection.get(include=["metadatas"])
-            if all_docs and all_docs["metadatas"]:
-                for meta in all_docs["metadatas"]:
-                    cat = meta.get("category", "uncategorized")
-                    categories[cat] = categories.get(cat, 0) + 1
-        except Exception:
-            pass
+            self.document_count = self._collection.count()
+        except Exception as e:
+            logger.error("Reading knowledge base statistics failed: %s", type(e).__name__)
+            raise KnowledgeBaseError("statistics unavailable") from None
+        for meta in (all_docs or {}).get("metadatas") or []:
+            cat = meta.get("category", "uncategorized")
+            categories[cat] = categories.get(cat, 0) + 1
 
-        self.document_count = self._collection.count()
         return {
             "total_chunks": self.document_count,
             "categories": categories,
             "collection_name": self.collection_name,
-            "persist_directory": self.persist_directory,
         }
 
     async def _generate_embeddings(self, texts: list[str]) -> list[list[float]]:
@@ -346,5 +336,5 @@ class KnowledgeBaseManager:
             embeddings = await self.embeddings.aembed_documents(texts)
             return embeddings
         except Exception as e:
-            logger.error("Embedding generation failed: %s", str(e))
+            logger.error("Embedding generation failed: %s", type(e).__name__)
             raise

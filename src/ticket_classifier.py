@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 IT support ticket classifier.
 
@@ -296,7 +295,8 @@ class TicketClassifier:
             return result
 
         except Exception as e:
-            logger.error("Classification failed: %s", str(e))
+            # Upstream errors can echo request content or credentials: log the type only.
+            logger.error("Classification failed, using keyword fallback: %s", type(e).__name__)
             return self._fallback_classification(title, description, start_time)
 
     async def batch_classify(
@@ -328,7 +328,7 @@ class TicketClassifier:
         try:
             data = json.loads(raw_response.strip())
         except json.JSONDecodeError as e:
-            logger.error("Failed to parse classifier response: %s", str(e))
+            logger.error("Failed to parse classifier response: %s", type(e).__name__)
             raise ValueError(f"Invalid JSON response from classifier: {str(e)}")
 
         # Validate required fields

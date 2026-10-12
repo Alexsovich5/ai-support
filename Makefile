@@ -1,12 +1,17 @@
 IMAGE ?= ai-support:dev
+COMPOSE_RENDERED := .compose-rendered.json
 
 .PHONY: build test shell clean up seed integration down
 
 build:
 	docker build --target dev -t $(IMAGE) .
 
+# The rendered compose config is checked too (loopback-only ports, least privilege).
 test: build
-	docker run --rm --network none -e LLM_PROVIDER=fake -e ANONYMIZED_TELEMETRY=False $(IMAGE) pytest
+	docker compose --profile test config --format json > $(COMPOSE_RENDERED)
+	docker run --rm --network none -e LLM_PROVIDER=fake -e ANONYMIZED_TELEMETRY=False \
+		-e COMPOSE_RENDERED=/tmp/compose-rendered.json \
+		-v "$(CURDIR)/$(COMPOSE_RENDERED):/tmp/compose-rendered.json:ro" $(IMAGE) pytest
 
 shell: build
 	docker run --rm -it --network none -e LLM_PROVIDER=fake -e ANONYMIZED_TELEMETRY=False $(IMAGE) bash
@@ -25,4 +30,4 @@ down:
 
 clean:
 	-docker image rm $(IMAGE)
-	rm -rf .pytest_cache .coverage htmlcov
+	rm -rf .pytest_cache .coverage htmlcov $(COMPOSE_RENDERED)

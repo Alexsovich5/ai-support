@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from src.main import create_app
+from tests.helpers import INGEST_HEADERS
 
 VPN_TICKET = {
     "title": "VPN keeps disconnecting",
@@ -95,6 +96,7 @@ def test_ingest_then_search_uses_profile_threshold(client):
             "category": "hardware",
             "title": "Badge reader rejects badges",
         },
+        headers=INGEST_HEADERS,
     )
     assert ingest.status_code == 200
     assert ingest.json()["chunks_created"] >= 1

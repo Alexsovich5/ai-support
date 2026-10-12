@@ -1,12 +1,15 @@
-#!/usr/bin/env python3
 """
-WebSocket Chat Handler
+WebSocket chat handler.
 
 Manages real-time WebSocket chat sessions for the AI support system.
 Handles connection lifecycle, message routing, typing indicators and
 idle timeouts. One handler is shared by every connection of an app, so
-the concurrent-session limit and the active-session count are app-wide.
-Messages are logged by session id and length only, never by content.
+the concurrent-session limit and the active-session count are app-wide;
+one client address may hold at most ``max_sessions_per_client`` of them.
+Raw frames are size-checked before JSON parsing, every model call holds a
+slot of the app's concurrency limiter, and messages are logged by session id
+and length only, never by content. Client-supplied values that reach a log
+line are sanitised first.
 """
 
 import asyncio
@@ -22,6 +25,8 @@ from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from src.config import ChatConfig
+from src.phi_filter import redact
+from src.security import ConcurrencyLimiter, LimiterBusy, log_value
 
 logger = logging.getLogger("ai_support.chat")
 
@@ -51,6 +56,7 @@ class ChatSession:
     )
     message_count: int = 0
     is_active: bool = True
+    client: str = "unknown"
     department: Optional[str] = None
     user_name: Optional[str] = None
     role: Optional[str] = None
@@ -64,6 +70,7 @@ DEFAULT_ESCALATION_TEXT = (
     "This issue needs a human support agent. Please contact the service desk "
     "and mention what you have already tried."
 )
+BUSY_TEXT = "The assistant is busy right now. Please try again in a moment."
 PROCESSING_ERROR_TEXT = (
     "I encountered an issue processing your request. Please try rephrasing "
     "or contact the service desk."
@@ -83,11 +90,18 @@ class ChatHandler:
         ai_engine,
         chat_config: ChatConfig,
         prompts: Optional[Mapping[str, Any]] = None,
+        work_limiter: Optional[ConcurrencyLimiter] = None,
     ):
         self.ai_engine = ai_engine
         self.max_message_length = chat_config.max_message_length
+        # A JSON frame carrying a maximal message, with room for escaping.
+        self.max_frame_chars = chat_config.max_message_length * 6 + 1024
         self.session_timeout_seconds = chat_config.session_timeout_seconds
         self.max_concurrent_sessions = chat_config.max_concurrent_sessions
+        self.max_sessions_per_client = chat_config.max_sessions_per_client
+        self.work_limiter = work_limiter or ConcurrencyLimiter(
+            chat_config.max_concurrent_sessions, chat_config.max_concurrent_sessions
+        )
         escalation = (prompts or {}).get("escalation", {}).get("threshold_warning")
         self.escalation_text = (
             " ".join(escalation.split()) if escalation else DEFAULT_ESCALATION_TEXT
@@ -123,6 +137,7 @@ class ChatHandler:
         department: Optional[str] = None,
         user_name: Optional[str] = None,
         role: Optional[str] = None,
+        client: str = "unknown",
     ) -> None:
         """Handle a complete WebSocket connection lifecycle."""
         await websocket.accept()
@@ -135,9 +150,14 @@ class ChatHandler:
             department=department,
             user_name=user_name,
             role=role,
+            client=client,
         )
 
-        if len(self._sessions) >= self.max_concurrent_sessions:
+        held_by_client = sum(1 for s in self._sessions.values() if s.client == client)
+        if (
+            len(self._sessions) >= self.max_concurrent_sessions
+            or held_by_client >= self.max_sessions_per_client
+        ):
             await self._send_message(
                 websocket,
                 MessageType.ERROR,
@@ -162,8 +182,8 @@ class ChatHandler:
         logger.info(
             "Chat session started: session_id=%s, user=%s, department=%s",
             session_id,
-            user_id,
-            department,
+            log_value(user_id),
+            log_value(department),
         )
 
         try:
@@ -171,7 +191,7 @@ class ChatHandler:
         except WebSocketDisconnect:
             logger.info("Client disconnected: session_id=%s", session_id)
         except Exception as e:
-            logger.error("Session error: session_id=%s, error=%s", session_id, str(e))
+            logger.error("Session error: session_id=%s, error=%s", session_id, type(e).__name__)
             try:
                 await self._send_message(
                     websocket,
@@ -183,6 +203,9 @@ class ChatHandler:
         finally:
             session.is_active = False
             self._sessions.pop(session_id, None)
+            end_session = getattr(self.ai_engine, "end_session", None)
+            if end_session is not None:
+                end_session(session_id)
             await self._close(websocket)
             logger.info(
                 "Chat session ended: session_id=%s, messages=%d",
@@ -206,9 +229,17 @@ class ChatHandler:
                 )
                 break
 
+            if len(raw_data) > self.max_frame_chars:
+                await self._send_message(
+                    session.websocket,
+                    MessageType.ERROR,
+                    {"error": f"Message too long. Maximum {self.max_message_length} characters."},
+                )
+                continue
+
             try:
                 data = json.loads(raw_data)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, RecursionError):
                 await self._send_message(
                     session.websocket,
                     MessageType.ERROR,
@@ -274,11 +305,13 @@ class ChatHandler:
                 "user_id": session.user_id,
             }
 
-            response = await self.ai_engine.process_message(
-                message=content,
-                session_id=session.session_id,
-                user_context=user_context,
-            )
+            async with self.work_limiter.slot(session.client):
+                response = await self.ai_engine.process_message(
+                    message=content,
+                    session_id=session.session_id,
+                    user_context=user_context,
+                    owner=session.client,
+                )
 
             # Stop typing indicator
             await self._send_message(
@@ -323,11 +356,14 @@ class ChatHandler:
                     },
                 )
 
+        except LimiterBusy:
+            await self._send_message(session.websocket, MessageType.TYPING_STOP, {})
+            await self._send_message(session.websocket, MessageType.ERROR, {"error": BUSY_TEXT})
         except Exception as e:
             logger.error(
                 "AI processing error: session=%s, error=%s",
                 session.session_id,
-                str(e),
+                type(e).__name__,
             )
             await self._send_message(
                 session.websocket,
@@ -344,13 +380,12 @@ class ChatHandler:
         """Handle user feedback on AI responses."""
         feedback_type = data.get("feedback_type", "")  # helpful, unhelpful, incorrect
         message_id = data.get("message_id", "")
-        comment = data.get("comment", "")
 
         logger.info(
             "Feedback received: session=%s, type=%s, message_id=%s",
             session.session_id,
-            feedback_type,
-            message_id,
+            log_value(feedback_type, 32),
+            log_value(message_id, 64),
         )
 
         await self._send_message(
@@ -360,11 +395,12 @@ class ChatHandler:
         )
 
     async def _handle_escalation(self, session: ChatSession, reason: str) -> None:
-        """Handle manual escalation request."""
+        """Handle manual escalation request; the reason is PHI-redacted and truncated."""
+        reason = redact(reason[: self.max_message_length]).text if reason else ""
         logger.info(
-            "Manual escalation requested: session=%s, reason=%s",
+            "Manual escalation requested: session=%s, reason_length=%d",
             session.session_id,
-            reason,
+            len(reason),
         )
 
         await self._send_message(
@@ -395,7 +431,7 @@ class ChatHandler:
         try:
             await websocket.send_json(message)
         except Exception as e:
-            logger.warning("Failed to send message: %s", str(e))
+            logger.warning("Failed to send message: %s", type(e).__name__)
 
     @staticmethod
     async def _close(websocket: WebSocket, code: int = 1000) -> None:
@@ -404,7 +440,7 @@ class ChatHandler:
         try:
             await websocket.close(code=code)
         except Exception as e:
-            logger.debug("Close failed: %s", str(e))
+            logger.debug("Close failed: %s", type(e).__name__)
 
     async def _cleanup_stale_sessions(self) -> None:
         """Periodically clean up inactive sessions."""
@@ -424,15 +460,12 @@ class ChatHandler:
             for session_id in stale_sessions:
                 session = self._sessions.pop(session_id, None)
                 if session:
-                    try:
-                        await self._send_message(
-                            session.websocket,
-                            MessageType.SESSION_END,
-                            {"message": "Session closed due to inactivity."},
-                        )
-                        await session.websocket.close()
-                    except Exception:
-                        pass
+                    await self._send_message(
+                        session.websocket,
+                        MessageType.SESSION_END,
+                        {"message": "Session closed due to inactivity."},
+                    )
+                    await self._close(session.websocket)
                     session.is_active = False
 
             if stale_sessions:

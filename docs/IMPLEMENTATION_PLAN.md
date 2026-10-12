@@ -1,10 +1,10 @@
 # ai-support: Implementation Plan
 
-There are 14 tasks, one commit each and in dependency order. Every task leaves `make test` green. Acceptance commands run from the repo root on a host with Docker and the Compose v2 plugin.
+There are 15 tasks, one commit each and in dependency order. Every task leaves `make test` green. Acceptance commands run from the repo root on a host with Docker and the Compose v2 plugin.
 
 Conventions:
 - `IMAGE ?= ai-support:dev`.
-- `make test` means `docker build --target dev -t $(IMAGE) .` followed by `docker run --rm --network none -e LLM_PROVIDER=fake -e ANONYMIZED_TELEMETRY=False $(IMAGE) pytest`. `--network none` makes any network access (a tiktoken download, a real OpenAI call) fail the run.
+- `make test` means `docker build --target dev -t $(IMAGE) .` followed by `docker run --rm --network none -e LLM_PROVIDER=fake -e ANONYMIZED_TELEMETRY=False $(IMAGE) pytest`. `--network none` makes any network access (a tiktoken download, a real OpenAI call) fail the run. From T15 on, the recipe first writes `docker compose --profile test config --format json` to `.compose-rendered.json` and mounts it into the test container (`COMPOSE_RENDERED`), so `tests/test_compose.py` checks the rendered config as well as the file.
 - `GUARD` is the repo-wide fabrication check, and `GUARD_STRINGS` checks the product strings (it passes only from T11 on, once `chat_handler.py` is cleaned):
   ```
   GUARD:         ! git grep -niE 'timeline: april|ael-dubai|dubai|acoria|etech|zambaiti|99\.9|uptime|mttr' -- . ':!docs'
@@ -334,7 +334,7 @@ Conventions:
     - `depends_on: {openai-stub: {condition: service_healthy}}`
     - healthcheck `python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"`
   - **`tester`**, under profile `test`, uses the dev image with `STACK_URL=http://api:8000`.
-  - The project name is `ai-support`; the services share a network on subnet `172.77.0.0/24`, and `api` publishes container port 8000 on host port 22700.
+  - The project name is `ai-support`; the services share a network on subnet `172.77.0.0/24`, and `api` publishes container port 8000 on host port 22700. (T15 splits this into `frontend` 172.77.0.0/25 and an internal `backend` 172.77.0.128/25, and binds the port to 127.0.0.1.)
 - **Files.** modify: `docker-compose.yml`, `Makefile` (targets `up`, `seed`, `integration`, `down`), and `Dockerfile` (the runtime stage also copies `stubs/` and `data/kb/`, so the stub command and `KB_SEED_DIR=/app/data/kb` work from the runtime image). `seed` is `docker compose exec -T api python -m src.ingest data/kb --api-url http://localhost:8000`, which goes through the API process. create: `tests/integration/__init__.py`, `tests/integration/test_stack.py` (skipped unless `STACK_URL` is set).
 - **Tests first.** Against the live stack, check the following:
   - Ready returns 200 with `kb_chunks > 0`.
@@ -383,4 +383,32 @@ Conventions:
 
   Documents what is built and tested, names the mocked OpenAI integration
   and lists the layout from the tracked files.
+  ```
+
+## T15 — Security and hygiene hardening
+
+- **Goal.** Close the security, correctness and hygiene gaps found in a whole-repository review, including the required items for this repository (ingest path safety, PHI redaction bypass, batch-wide request and compose hardening, secrets in logs).
+- **Found and changed.**
+  - *Ingest path traversal and symlinks (blocker).* `iter_files` used `rglob` + `read_text`, which followed symlinked files and directories (a link to `/etc/passwd` was ingested), blocked on FIFOs, had no size or count limits and echoed absolute paths in errors. `src/ingest.py` now walks with `os.scandir` without following links, reports symlinks and non-regular files, opens each file once with `O_NOFOLLOW | O_NONBLOCK`, checks `fstat` type, inode identity and a `commonpath` containment check, and enforces `IngestLimits` (file size, file count, total bytes, depth). Errors carry relative paths and fixed messages. `validate_source` rejects `..`, absolute paths, drive letters, backslashes, NUL and control characters, and `IngestRequest.source` uses it. `KnowledgeBaseManager.ingest_directory` (a second, unsafe walker that also read `.html`/`.rst`) now delegates to it. Tests: `tests/test_ingest_safety.py`.
+  - *PHI redaction bypass (blocker).* Full-width digits, zero-width splits, Unicode dashes, spaced digits, percent/HTML encoding, base64 fragments, JSON fields, URL userinfo, other date formats, labelled names and street addresses all passed through. `src/phi_filter.py` normalises first, adds those classes with linear-time patterns, adds `redact_structure`, and fails closed (size cap 200,000 characters or any error gives `WITHHELD_TEXT`). Knowledge-base articles, titles and search queries are now redacted before embedding or storage, the search response echoes the redacted query, and WebSocket escalation reasons are redacted before they are logged or echoed. Tests: `tests/test_phi_filter.py`, `tests/test_security.py`.
+  - *Unauthenticated ingest (major).* Anyone who could reach the API could rewrite the articles that chat answers are built from. Ingest now needs `Authorization: Bearer <key>` (constant-time compare, 503 when no key is configured, per-address failure throttle with a bounded table). The key comes only from `INGEST_API_KEY_FILE`; `src/keygen.py` creates a random one on first start in the stack. The CLI's `--api-url` mode sends it.
+  - *CSRF, oversized bodies, error echoes (major).* `src/security.py` adds `RequestGuardMiddleware`: JSON-only and same-origin state-changing requests, a raw-byte body cap that answers 413 before parsing, and a generic 500 for unhandled errors (exception type logged only). Validation errors no longer echo the rejected input. WebSocket upgrades from another origin, malformed user ids and over-long query parameters are closed with 1008, and raw frames are size-checked before JSON parsing (uvicorn `--ws-max-size 65536`). Request models forbid unknown fields and bound every string (ingest content at most 100,000 characters).
+  - *Unbounded work and state (major).* One `ConcurrencyLimiter` with a per-client quota guards every model/embedding path (REST and WebSocket). Chat histories are capped overall and per client with LRU eviction, are keyed by client address and session id (a guessed session id from another address cannot read a conversation), and WebSocket histories are dropped on close. One address may hold at most `max_sessions_per_client` WebSocket sessions. The stub caps embedding batches at 2048 inputs.
+  - *Fail-open failures (major).* Knowledge-base search errors returned `[]` (shown as "no results") and statistics errors were swallowed; both now raise `KnowledgeBaseError` and the API answers 503. `/health/ready` is 503 when any seed file failed instead of reporting ready with missing articles.
+  - *Secrets and leaks (major).* The OpenAI key was a plain string in `Settings` (visible in `repr`), the compose file passed it as an environment value, and classifier/engine/KB failures logged `str(exc)`, which for OpenAI errors can carry the key prefix and request text. Keys are now `SecretStr`, read from `*_FILE` paths in the stack, and failures log the exception type only. A sentinel test drives an upstream 401 that echoes the key and a wrong ingest key and checks logs, stdout/stderr and responses. Client-supplied values in log lines go through `log_value` (control characters stripped, truncated). `/knowledge/stats` no longer returns the store path.
+  - *Compose least privilege (major).* Port published on `127.0.0.1:22700` only; every service runs as uid 10001 with `cap_drop: [ALL]` and `no-new-privileges`; API, stub and init have read-only root filesystems with a `/tmp` tmpfs; the stub moved to an internal `backend` network without published ports; key files live in a `secrets` volume that only `secrets-init` writes and only `api` and `tester` mount read-only. `tests/test_compose.py` checks the committed file and the rendered config.
+  - *Hygiene (minor).* Removed template "Project:" headers and stray shebangs from `src/knowledge_base.py`, `src/chat_handler.py`, `src/ticket_classifier.py` and `tests/test_classifier.py`; added `.gitignore`.
+- **Deviations.**
+  - The single `172.77.0.0/24` network from T13 is split into `frontend` (`172.77.0.0/25`) and an internal `backend` (`172.77.0.128/25`), both inside the lane.
+  - IP addresses are not redacted even though generic PHI lists include them: the SPEC's identifier classes do not, and the T7 tests require gateway and device addresses to stay readable for network triage.
+  - The `make test` recipe also renders the compose config (see Conventions). `make integration` and `make seed` are unchanged in form; the tester and `make seed` read the ingest key from the `secrets` volume.
+- **Acceptance.** `make test && make integration && GUARD && GUARD_STRINGS`
+- **Commit.**
+  ```
+  Harden ingest, PHI filter, request guards and compose stack
+
+  Refuses symlinks and unbounded reads in ingest, normalises input before
+  PHI matching and fails closed, requires an ingest key, caps bodies and
+  concurrent work, stops leaking errors and keys, and runs every service
+  unprivileged behind loopback-only ports.
   ```

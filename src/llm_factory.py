@@ -16,7 +16,7 @@ PURPOSES = ("chat", "classification")
 def _openai_kwargs(settings: Settings, http_client: Any, http_async_client: Any) -> dict:
     kwargs: dict = {}
     if settings.llm.api_key:
-        kwargs["api_key"] = settings.llm.api_key
+        kwargs["api_key"] = settings.llm.api_key.get_secret_value()
     if settings.llm.base_url:
         kwargs["base_url"] = settings.llm.base_url
     if http_client is not None:

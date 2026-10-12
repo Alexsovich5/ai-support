@@ -6,15 +6,17 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from src.config import load_settings
+from tests.helpers import TEST_INGEST_KEY
 
 SEED_DIR = Path(__file__).resolve().parent.parent / "data" / "kb"
 
 
 @pytest.fixture
 def settings(tmp_path):
-    """Fake-provider settings with a private Chroma directory and seed copy."""
+    """Fake-provider settings with a private Chroma directory, seed copy and ingest key."""
     seed_dir = tmp_path / "kb"
     shutil.copytree(SEED_DIR, seed_dir)
     base = load_settings(env={"LLM_PROVIDER": "fake"})
@@ -25,6 +27,9 @@ def settings(tmp_path):
                     "persist_directory": str(tmp_path / "chroma"),
                     "collection_name": f"kb_{uuid.uuid4().hex}",
                 }
+            ),
+            "security": base.security.model_copy(
+                update={"ingest_api_key": SecretStr(TEST_INGEST_KEY)}
             ),
             "kb_seed_dir": str(seed_dir),
         }

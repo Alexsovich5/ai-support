@@ -11,8 +11,14 @@ import httpx
 import pytest
 
 STACK_URL = os.environ.get("STACK_URL")
+KEY_FILE = os.environ.get("INGEST_API_KEY_FILE")
 
 pytestmark = pytest.mark.skipif(not STACK_URL, reason="STACK_URL is not set")
+
+
+def _ingest_headers():
+    with open(KEY_FILE, encoding="utf-8") as handle:
+        return {"Authorization": f"Bearer {handle.read().strip()}"}
 
 
 @pytest.fixture(scope="module")
@@ -85,6 +91,7 @@ def test_ingest_then_search(http):
             "category": "hardware",
             "title": "Badge reader rejects badges",
         },
+        headers=_ingest_headers(),
     )
     assert ingest.status_code == 200
     assert ingest.json()["chunks_created"] >= 1
@@ -95,3 +102,21 @@ def test_ingest_then_search(http):
     assert response.status_code == 200
     sources = [r["source"] for r in response.json()["results"]]
     assert source in sources
+
+
+def test_ingest_without_the_key_is_refused(http):
+    body = {"content": "Some article text here.", "source": "nokey.md", "category": "hardware"}
+    assert http.post("/api/v1/knowledge/ingest", json=body).status_code == 401
+    wrong = http.post(
+        "/api/v1/knowledge/ingest", json=body, headers={"Authorization": "Bearer not-the-key"}
+    )
+    assert wrong.status_code == 401
+
+
+def test_cross_origin_post_is_refused(http):
+    response = http.post(
+        "/api/v1/chat",
+        json={"message": "VPN drops", "session_id": "x-origin"},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert response.status_code == 403

@@ -1,15 +1,29 @@
-"""Pydantic request and response models for the API endpoints."""
+"""Pydantic request and response models for the API endpoints.
+
+Request models forbid unknown fields and bound every string, so oversized or
+unexpected input is rejected with 422 before any service runs.
+"""
 
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from src.ingest import validate_source
+
+SESSION_ID_PATTERN = r"^[A-Za-z0-9._:-]{1,64}$"
+CATEGORY_PATTERN = r"^[A-Za-z0-9_-]{1,50}$"
+MAX_INGEST_CHARS = 100_000
+
+
+class _Request(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 # -------------------------------------------------------------------
 # Chat Models
 # -------------------------------------------------------------------
 
-class ChatRequest(BaseModel):
+class ChatRequest(_Request):
     message: str = Field(
         ...,
         min_length=1,
@@ -20,6 +34,7 @@ class ChatRequest(BaseModel):
         ...,
         min_length=1,
         max_length=64,
+        pattern=SESSION_ID_PATTERN,
         description="Unique session identifier for conversation continuity",
     )
     department: Optional[str] = Field(
@@ -34,6 +49,7 @@ class ChatRequest(BaseModel):
     )
 
     model_config = {
+        "extra": "forbid",
         "json_schema_extra": {
             "examples": [
                 {
@@ -78,7 +94,7 @@ class ChatResponse(BaseModel):
 # Ticket Classification Models
 # -------------------------------------------------------------------
 
-class ClassifyRequest(BaseModel):
+class ClassifyRequest(_Request):
     title: str = Field(
         ...,
         min_length=1,
@@ -103,6 +119,7 @@ class ClassifyRequest(BaseModel):
     )
 
     model_config = {
+        "extra": "forbid",
         "json_schema_extra": {
             "examples": [
                 {
@@ -133,7 +150,7 @@ class ClassifyResponse(BaseModel):
 # Knowledge Base Models
 # -------------------------------------------------------------------
 
-class KnowledgeSearchRequest(BaseModel):
+class KnowledgeSearchRequest(_Request):
     query: str = Field(
         ...,
         min_length=1,
@@ -148,6 +165,7 @@ class KnowledgeSearchRequest(BaseModel):
     )
     category: Optional[str] = Field(
         None,
+        pattern=CATEGORY_PATTERN,
         description="Filter by knowledge category",
     )
     min_relevance: Optional[float] = Field(
@@ -164,22 +182,24 @@ class KnowledgeSearchResponse(BaseModel):
     query: str = Field(..., description="Original search query")
 
 
-class IngestRequest(BaseModel):
+class IngestRequest(_Request):
     content: str = Field(
         ...,
         min_length=10,
+        max_length=MAX_INGEST_CHARS,
         description="Document content to ingest",
     )
     source: str = Field(
         ...,
         min_length=1,
         max_length=256,
-        description="Document source identifier",
+        description="Relative document name, e.g. vpn/disconnects.md (no '..', absolute paths or backslashes)",
     )
     category: str = Field(
         ...,
         min_length=1,
         max_length=50,
+        pattern=CATEGORY_PATTERN,
         description="Knowledge category",
     )
     title: str = Field(
@@ -188,8 +208,17 @@ class IngestRequest(BaseModel):
         description="Document title",
     )
 
+    @field_validator("source")
+    @classmethod
+    def _safe_source(cls, value: str) -> str:
+        return validate_source(value)
+
 
 class IngestResponse(BaseModel):
     doc_id: str = Field(..., description="Generated document ID")
     chunks_created: int = Field(..., description="Number of chunks created")
     total_documents: int = Field(..., description="Total documents in knowledge base")
+    phi_redacted: list[str] = Field(
+        default_factory=list,
+        description="Kinds of patient identifiers redacted from the article before storage",
+    )

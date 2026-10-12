@@ -32,6 +32,7 @@ from src.fakes import HashingEmbeddings, extractive_answer
 from src.ticket_classifier import FALLBACK_KEYWORDS, keyword_rules
 
 CLASSIFICATION_MARKER = "### TICKET_CLASSIFICATION_JSON ###"
+MAX_EMBEDDING_INPUTS = 2048
 CLASSIFICATION_CONFIDENCE = 0.75
 
 app = FastAPI(title="OpenAI-compatible stub", docs_url=None, redoc_url=None)
@@ -177,6 +178,8 @@ def embeddings(request: EmbeddingRequest):
             "(build OpenAIEmbeddings with check_embedding_ctx_length=False).",
             "input",
         )
+    if len(texts) > MAX_EMBEDDING_INPUTS:
+        return _error(400, f"At most {MAX_EMBEDDING_INPUTS} inputs per request.", "input")
     if request.encoding_format not in ("float", "base64"):
         return _error(400, f"Unsupported encoding_format '{request.encoding_format}'.",
                       "encoding_format")

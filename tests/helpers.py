@@ -6,6 +6,9 @@ from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import BaseMessage
 
+TEST_INGEST_KEY = "test-ingest-key-not-a-secret"
+INGEST_HEADERS = {"Authorization": f"Bearer {TEST_INGEST_KEY}"}
+
 
 class RecordingFakeChatModel(FakeListChatModel):
     """FakeListChatModel that keeps every list of messages it receives."""

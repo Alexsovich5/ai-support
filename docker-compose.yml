@@ -5,15 +5,35 @@ x-runtime-build: &runtime-build
   dockerfile: Dockerfile
   target: runtime
 
+# Every service: unprivileged user, no Linux capabilities, no privilege gain.
+x-hardening: &hardening
+  user: "10001:10001"
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
 services:
+  # Creates the ingest key and the stub OpenAI key file on first start.
+  secrets-init:
+    <<: *hardening
+    build: *runtime-build
+    image: ai-support:runtime
+    command: ["python", "-m", "src.keygen", "/run/ai-support"]
+    read_only: true
+    network_mode: none
+    volumes:
+      - secrets:/run/ai-support
+
   openai-stub:
+    <<: *hardening
     build: *runtime-build
     image: ai-support:runtime
     command: ["uvicorn", "stubs.openai_stub:app", "--host", "0.0.0.0", "--port", "8001"]
+    read_only: true
+    tmpfs: [/tmp]
     environment:
       - ANONYMIZED_TELEMETRY=False
     networks:
-      - ai-support
+      - backend
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/v1/models')"]
       interval: 5s
@@ -22,24 +42,32 @@ services:
       start_period: 5s
 
   api:
+    <<: *hardening
     build: *runtime-build
     image: ai-support:runtime
+    read_only: true
+    tmpfs: [/tmp]
     ports:
-      - "22700:8000"
+      - "127.0.0.1:22700:8000"
     environment:
       - LLM_PROVIDER=openai
       - OPENAI_BASE_URL=http://openai-stub:8001/v1
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-sk-stub-not-a-real-key}
+      - OPENAI_API_KEY_FILE=/run/ai-support/openai_api_key
+      - INGEST_API_KEY_FILE=/run/ai-support/ingest_api_key
       - RETRIEVAL_PROFILE=hashing
       - KB_SEED_DIR=/app/data/kb
       - ANONYMIZED_TELEMETRY=False
     volumes:
       - chroma_data:/app/data/chroma
+      - secrets:/run/ai-support:ro
     depends_on:
+      secrets-init:
+        condition: service_completed_successfully
       openai-stub:
         condition: service_healthy
     networks:
-      - ai-support
+      - frontend
+      - backend
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
       interval: 5s
@@ -48,6 +76,7 @@ services:
       start_period: 10s
 
   tester:
+    <<: *hardening
     profiles: ["test"]
     build:
       context: .
@@ -56,19 +85,30 @@ services:
     image: ai-support:dev
     environment:
       - STACK_URL=http://api:8000
+      - INGEST_API_KEY_FILE=/run/ai-support/ingest_api_key
       - ANONYMIZED_TELEMETRY=False
+    volumes:
+      - secrets:/run/ai-support:ro
     depends_on:
       api:
         condition: service_healthy
     networks:
-      - ai-support
+      - frontend
 
 volumes:
   chroma_data:
+  secrets:
 
 networks:
-  ai-support:
-    name: ai-support
+  frontend:
+    name: ai-support-frontend
     ipam:
       config:
-        - subnet: 172.77.0.0/24
+        - subnet: 172.77.0.0/25
+  # The stub is reachable only from the API, never from the host.
+  backend:
+    name: ai-support-backend
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.77.0.128/25

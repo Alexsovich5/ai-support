@@ -1,10 +1,13 @@
 """REST and WebSocket routes.
 
 Services are resolved from ``request.app.state``, where the application
-lifespan stores them.
+lifespan stores them. Every route that runs model or embedding work holds a
+slot of the app's ``ConcurrencyLimiter`` (``work_slot``), and ingest requires
+the operator ingest key (``require_ingest_key``).
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -20,6 +23,8 @@ from src.api.models import (
     KnowledgeSearchRequest,
     KnowledgeSearchResponse,
 )
+from src.phi_filter import redact
+from src.security import bearer_token, keys_match, log_value, origin_allowed
 
 logger = logging.getLogger("ai_support.api")
 
@@ -27,6 +32,7 @@ router = APIRouter()
 
 
 MAX_BATCH_SIZE = 50
+_USER_ID = re.compile(r"^[A-Za-z0-9._@-]{1,64}$")
 
 
 def _service(request: Request, name: str, label: str):
@@ -52,18 +58,59 @@ def get_settings(request: Request):
     return request.app.state.settings
 
 
+def client_key(connection) -> str:
+    """The address a request or WebSocket came from, used for per-client quotas."""
+    client = connection.client
+    return client.host if client and client.host else "unknown"
+
+
+async def work_slot(request: Request):
+    """Hold one concurrency slot for the duration of the request, or answer 503."""
+    limiter = request.app.state.work_limiter
+    key = client_key(request)
+    if not limiter.try_acquire(key):
+        raise HTTPException(status_code=503, detail="Server busy, please retry shortly")
+    try:
+        yield
+    finally:
+        limiter.release(key)
+
+
+async def require_ingest_key(request: Request) -> None:
+    """Deny unless the configured ingest key is presented as a Bearer token."""
+    configured = request.app.state.settings.security.ingest_api_key
+    if configured is None:
+        raise HTTPException(status_code=503, detail="Ingest is disabled: no ingest key is configured")
+    failures = request.app.state.auth_failures
+    key = client_key(request)
+    if failures.blocked(key):
+        raise HTTPException(status_code=429, detail="Too many failed attempts, retry later")
+    supplied = bearer_token(request.headers.get("authorization"))
+    if not keys_match(supplied, configured.get_secret_value()):
+        failures.record_failure(key)
+        logger.warning("Ingest key rejected: client=%s", log_value(key))
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid ingest key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 # -------------------------------------------------------------------
 # Chat Endpoints
 # -------------------------------------------------------------------
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatResponse, dependencies=[Depends(work_slot)])
 async def chat(
     request: ChatRequest,
+    http_request: Request,
     ai_engine=Depends(get_ai_engine),
 ):
     """
     Process a chat message and return AI response.
-    Supports single-turn and multi-turn conversations via session_id.
+    Supports single-turn and multi-turn conversations via session_id. The
+    history is kept per (client address, session_id), so a session id used
+    from another address starts a separate conversation.
     """
     logger.info(
         "Chat request: session=%s, message_length=%d",
@@ -80,8 +127,9 @@ async def chat(
 
     response = await ai_engine.process_message(
         message=request.message,
-        session_id=request.session_id,
+        session_id=f"{client_key(http_request)}|{request.session_id}",
         user_context=user_context,
+        owner=client_key(http_request),
     )
 
     return ChatResponse(
@@ -102,7 +150,24 @@ async def websocket_chat(
     department: Optional[str] = Query(None),
     role: Optional[str] = Query(None),
 ):
-    """WebSocket endpoint for real-time chat sessions on the app's shared handler."""
+    """WebSocket endpoint for real-time chat sessions on the app's shared handler.
+
+    Upgrades from another origin, malformed user ids and over-long query
+    parameters are refused with close code 1008 before the socket is accepted.
+    """
+    settings = websocket.app.state.settings
+    if not origin_allowed(
+        websocket.headers.get("origin"), websocket.headers.get("host"), settings.security.allowed_origins
+    ):
+        await websocket.close(code=1008)
+        return
+    if (
+        not _USER_ID.match(user_id)
+        or len(department or "") > 100
+        or len(role or "") > 50
+    ):
+        await websocket.close(code=1008)
+        return
     handler = getattr(websocket.app.state, "chat_handler", None)
     if handler is None:
         await websocket.close(code=1013)
@@ -112,6 +177,7 @@ async def websocket_chat(
         user_id=user_id,
         department=department,
         role=role,
+        client=client_key(websocket),
     )
 
 
@@ -119,7 +185,7 @@ async def websocket_chat(
 # Ticket Classification Endpoints
 # -------------------------------------------------------------------
 
-@router.post("/classify", response_model=ClassifyResponse)
+@router.post("/classify", response_model=ClassifyResponse, dependencies=[Depends(work_slot)])
 async def classify_ticket(request: ClassifyRequest, classifier=Depends(get_classifier)):
     """
     Classify an IT support ticket into category, priority, and severity.
@@ -153,7 +219,7 @@ async def classify_ticket(request: ClassifyRequest, classifier=Depends(get_class
     )
 
 
-@router.post("/classify/batch")
+@router.post("/classify/batch", dependencies=[Depends(work_slot)])
 async def batch_classify_tickets(
     tickets: list[ClassifyRequest],
     classifier=Depends(get_classifier),
@@ -187,7 +253,7 @@ async def batch_classify_tickets(
 # Knowledge Base Endpoints
 # -------------------------------------------------------------------
 
-@router.post("/knowledge/search", response_model=KnowledgeSearchResponse)
+@router.post("/knowledge/search", response_model=KnowledgeSearchResponse, dependencies=[Depends(work_slot)])
 async def search_knowledge_base(
     request: KnowledgeSearchRequest,
     kb=Depends(get_knowledge_base),
@@ -207,11 +273,15 @@ async def search_knowledge_base(
     return KnowledgeSearchResponse(
         results=results,
         total_results=len(results),
-        query=request.query,
+        query=redact(request.query).text,
     )
 
 
-@router.post("/knowledge/ingest", response_model=IngestResponse)
+@router.post(
+    "/knowledge/ingest",
+    response_model=IngestResponse,
+    dependencies=[Depends(require_ingest_key), Depends(work_slot)],
+)
 async def ingest_document(
     request: IngestRequest,
     kb=Depends(get_knowledge_base),
@@ -232,6 +302,7 @@ async def ingest_document(
         doc_id=result["doc_id"],
         chunks_created=result["chunks_created"],
         total_documents=result["total_documents"],
+        phi_redacted=result.get("phi_redacted", []),
     )
 
 

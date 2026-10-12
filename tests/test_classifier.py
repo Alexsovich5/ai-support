@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
 """
-Ticket Classifier Unit Tests
-Project: AI-Powered Healthcare IT Support System
+Ticket classifier unit tests.
 
 Unit tests for the ticket classification system including
 AI-based and fallback classification paths.

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, Optional
 
 import yaml
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 DEFAULT_SETTINGS_PATH = CONFIG_DIR / "settings.yml"
@@ -32,7 +32,7 @@ class LLMConfig(_Frozen):
     max_tokens: int
     request_timeout: float
     embedding_model: str
-    api_key: Optional[str] = None
+    api_key: Optional[SecretStr] = None
     base_url: Optional[str] = None
 
 
@@ -54,10 +54,24 @@ class ChatConfig(_Frozen):
     max_context_messages: int
     session_timeout_seconds: float
     max_concurrent_sessions: int
+    max_sessions_per_client: int = Field(20, ge=1)
+    max_tracked_sessions: int = Field(1000, ge=1)
+    max_tracked_sessions_per_client: int = Field(50, ge=1)
 
 
 class SecurityConfig(_Frozen):
     phi_detection_enabled: bool = True
+    # Never read from the YAML file: only from INGEST_API_KEY_FILE.
+    ingest_api_key: Optional[SecretStr] = None
+    allowed_origins: tuple[str, ...] = ()
+    auth_failure_limit: int = Field(10, ge=1)
+    auth_failure_window_seconds: float = Field(60, gt=0)
+
+
+class LimitsConfig(_Frozen):
+    max_request_bytes: int = Field(1_048_576, ge=1024)
+    max_concurrent_requests: int = Field(8, ge=1)
+    max_concurrent_requests_per_client: int = Field(4, ge=1)
 
 
 class EscalationConfig(_Frozen):
@@ -72,6 +86,7 @@ class Settings(_Frozen):
     retrieval_profile: Optional[Literal["openai", "hashing"]] = None
     chat: ChatConfig
     security: SecurityConfig
+    limits: LimitsConfig = LimitsConfig()
     escalation: EscalationConfig
     kb_seed_dir: Optional[str] = None
 
@@ -105,7 +120,20 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+def _read_key_file(var: str, path: str) -> str:
+    """Return the stripped contents of a key file named by ``var``."""
+    try:
+        value = Path(path).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError(f"{var} names a file that cannot be read ({exc.strerror})") from None
+    if not value:
+        raise ValueError(f"{var} names an empty file")
+    return value
+
+
 def _apply_env(data: dict[str, Any], env: Mapping[str, str]) -> dict[str, Any]:
+    if "ingest_api_key" in (data.get("security") or {}):
+        raise ValueError("security.ingest_api_key is read only from INGEST_API_KEY_FILE")
     overrides = {
         "LLM_PROVIDER": ("llm", "provider"),
         "OPENAI_API_KEY": ("llm", "api_key"),
@@ -122,6 +150,14 @@ def _apply_env(data: dict[str, Any], env: Mapping[str, str]) -> dict[str, Any]:
         data["retrieval_profile"] = env["RETRIEVAL_PROFILE"]
     if env.get("KB_SEED_DIR"):
         data["kb_seed_dir"] = env["KB_SEED_DIR"]
+    key_files = {
+        "OPENAI_API_KEY_FILE": ("llm", "api_key"),
+        "INGEST_API_KEY_FILE": ("security", "ingest_api_key"),
+    }
+    for var, (section, key) in key_files.items():
+        if env.get(var):
+            data.setdefault(section, {})
+            data[section][key] = _read_key_file(var, env[var])
     return data
 
 

@@ -1,6 +1,8 @@
 # Application settings. Environment variables override selected keys:
 # LLM_PROVIDER, OPENAI_API_KEY, OPENAI_BASE_URL, CHROMA_PERSIST_DIR,
 # RETRIEVAL_PROFILE, KB_SEED_DIR and LOG_LEVEL. APP_CONFIG selects another file.
+# OPENAI_API_KEY_FILE and INGEST_API_KEY_FILE name key files; the ingest key
+# is never read from this file.
 
 app:
   name: "AI IT Support"
@@ -40,9 +42,24 @@ chat:
   max_context_messages: 10
   session_timeout_seconds: 1800
   max_concurrent_sessions: 200
+  max_sessions_per_client: 20
+  # Conversation histories kept in memory (least recently used dropped first).
+  max_tracked_sessions: 1000
+  max_tracked_sessions_per_client: 50
 
 security:
   phi_detection_enabled: true
+  # Extra origins allowed for state-changing requests and WebSocket upgrades;
+  # same-origin requests and requests without an Origin header are always allowed.
+  allowed_origins: []
+  auth_failure_limit: 10
+  auth_failure_window_seconds: 60
+
+limits:
+  max_request_bytes: 1048576
+  # Concurrent model/embedding work, overall and per client address.
+  max_concurrent_requests: 8
+  max_concurrent_requests_per_client: 4
 
 escalation:
   auto_escalate_categories:

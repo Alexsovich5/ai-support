@@ -18,6 +18,8 @@ ENV_VARS = (
     "RETRIEVAL_PROFILE",
     "KB_SEED_DIR",
     "LOG_LEVEL",
+    "OPENAI_API_KEY_FILE",
+    "INGEST_API_KEY_FILE",
 )
 
 
@@ -101,7 +103,7 @@ class TestLoadSettings:
         settings = load_settings()
 
         assert settings.llm.provider == "openai"
-        assert settings.llm.api_key == "sk-test"
+        assert settings.llm.api_key.get_secret_value() == "sk-test"
         assert settings.llm.base_url == "http://stub:8001/v1"
         assert settings.knowledge_base.persist_directory == str(tmp_path / "chroma")
         assert settings.retrieval_profile == "hashing"

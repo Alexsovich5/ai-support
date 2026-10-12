@@ -205,3 +205,11 @@ class TestClassificationThroughStub:
         assert result.category == TicketCategory.SECURITY
         assert result.priority == TicketPriority.HIGH
         assert result.requires_escalation is True
+
+
+def test_embedding_batches_above_the_cap_are_rejected():
+    with TestClient(stub_app, base_url="http://stub") as client:
+        response = client.post(
+            "/v1/embeddings", json={"model": "m", "input": ["vpn"] * 2049}
+        )
+    assert response.status_code == 400
